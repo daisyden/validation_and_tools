@@ -42,6 +42,20 @@ def merge(f1: str, f2: str, output: str):
 
     # Usage
     split_with_progress(merged_df, 4, output)
+    
+    mask = (merged_df['Result'] == 'passed') & (merged_df['Result-XPU'].isin(['skipped', '']) | merged_df['Result-XPU'].isna())
+    filtered_df = merged_df[mask]
+    filtered_df.to_csv("xpu_skipped_inductor.csv", index=False)
+
+    for index, row in filtered_df.iterrows():
+        testfile = row['Testfile']
+        class_xpu = row['Class-XPU']
+        testcase_xpu = row['Testcase-XPU'] 
+        testcase = row['Testcase'].replace("cuda", "xpu") 
+
+        with open('xpu_skipped_inductor.txt', 'a') as file: 
+            file.write(f"pytest -v {testfile} -k {testcase} \n")
+
 
 
 if __name__ == "__main__":

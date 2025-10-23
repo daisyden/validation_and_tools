@@ -19,7 +19,10 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str):
         df2 = df2.iloc[:-1]
     if len(df3) > 0 and df3.iloc[-1, 1] == "**Total**" :  # iloc[-1, 1] gets last row, 2nd column
         df3 = df3.iloc[:-1]
+    if len(df4) > 0 and df4.iloc[-1, 1] == " **Total** " :  # iloc[-1, 1] gets last row, 2nd column
+        df4 = df4.iloc[:-1]
  
+
     df1 = df1[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
     df2 = df2[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
     df3 = df3[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
@@ -51,6 +54,11 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str):
     merged_df["Testfile"] = merged_df["Testfile"].astype(str)
     
     merged_df = pd.merge(merged_df, df_local, on='Testfile', how='outer')
+
+    df_c = pd.read_csv("data/collected.csv") 
+
+    df_c = df_c.rename(columns={df_c.columns[0]: 'Testfile', df_c.columns[1]: f"total", df_c.columns[2]: f"deselected", df_c.columns[3]: f"selected" })
+    merged_df = pd.merge(merged_df, df_c, on='Testfile', how='outer')
 
     # Fill NaN values with 0 and convert to integers
     for col in merged_df.columns:

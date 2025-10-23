@@ -264,29 +264,27 @@ def process_log_file(log_file):
     except Exception as e:
         print(f"Error processing {log_file}: {e}", file=sys.stderr)
 
-def process_xml_file(xml_files):
-    current_file = ""
+def process_logs(log_files):
     file_case_status = {}
-    suite_summary_cases = [0, 0, 0, 0, 0, 0]
 
-    for xml_file in xml_files:
+    for log_file in log_files:
         try:
-            xml = JUnitXml.fromfile(xml_file)
-            ut = os.path.basename(xml_file).split('.')[0]
+            ut = os.path.basename(log_file).split('.')[0]
 
-            def map_xml_to_pytest_path(xml_filename):
-                # Remove .xml extension
-                xml_filename = xml_filename.replace('xml/', '')
-                name_without_ext = xml_filename.replace('.xml', '')
+            def map_log_to_pytest_path(log_filename):
+                # Remove .log extension
+                log_filename = os.path.basename(log_filename)
+                log_filename = log_filename.replace('logs/', '')
+                name_without_postfix = '_'.join(log_filename.rsplit('_')[:-3])
                 
                 # Split by dots to get folder structure
-                parts = name_without_ext.split('.')
+                parts = name_without_postfix.split('.')
                 
                 # Remove SHA from the last part (test file name)
                 test_file = parts[-1]
-                # SHA is typically after the last dash, remove everything after last dash
-                if '-' in test_file:
-                    test_file = test_file.rsplit('-', 1)[0]
+                ## SHA is typically after the last dash, remove everything after last dash
+                #if '-' in test_file:
+                #    test_file = test_file.rsplit('-', 1)[0]
                 # Reconstruct path
                 if len(parts) > 1:
                     # Join folders with slashes, add .py extension
@@ -296,146 +294,105 @@ def process_xml_file(xml_files):
                     # No folder structure, just the test file
                     return 'test/' + test_file + '.py'
 
-            def map_xml_to_pytest_path2(xml_filename):
-                # For example: op_ut_with_skip_nn_test_convolution_xpu.py.xml
+            #def map_log_to_pytest_path2(log_filename):
+            #    # For example: op_ut_with_skip_nn_test_convolution_xpu.py.log
 
-                # Remove .xml extension
-                name_without_ext = xml_filename.replace('.xml', '')
-                name_without_ext = name_without_ext.replace('_xpu.py', '.py')
-                name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_', '')
-                
-                pos = name_without_prefix.find('test_')
-                if pos > 0:
-                    folders = name_without_prefix[:pos-1]
-                else:
-                    folders = '' 
+            #    # Remove .log extension
+            #    name_without_ext = log_filename.replace('.log', '')
+            #    name_without_ext = name_without_ext.replace('_xpu.py', '.py')
+            #    name_without_prefix = name_without_ext.replace('log/op_ut_with_skip_', '')
+            #    
+            #    pos = name_without_prefix.find('test_')
+            #    if pos > 0:
+            #        folders = name_without_prefix[:pos-1]
+            #    else:
+            #        folders = '' 
 
-                test_file = name_without_prefix[pos:]
-                # Split by dots to get folder structure
-                if len(folders) > 0:
-                    parts = folders.split('_')
-                
-                    # Reconstruct path
-                    if len(parts) >= 1:
-                        # Join folders with slashes, add .py extension
-                        path_parts = parts 
-                        return 'test/' + '/'.join(path_parts) + '/' + test_file
-                else:
-                    # No folder structure, just the test file
-                    return 'test/' + test_file
+            #    test_file = name_without_prefix[pos:]
+            #    # Split by dots to get folder structure
+            #    if len(folders) > 0:
+            #        parts = folders.split('_')
+            #    
+            #        # Reconstruct path
+            #        if len(parts) >= 1:
+            #            # Join folders with slashes, add .py extension
+            #            path_parts = parts 
+            #            return 'test/' + '/'.join(path_parts) + '/' + test_file
+            #    else:
+            #        # No folder structure, just the test file
+            #        return 'test/' + test_file
 
 
             if args.p == "upstream":  
                 # Example
-                ut = map_xml_to_pytest_path(xml_file)
-            else:
-                ut = map_xml_to_pytest_path2(xml_file)
-
-
-            category = determine_category(ut)
-
-            def count_cases(case, add=True):
-                status_map = {
-                'skipped': 0,
-                'passed': 1,
-                'failed': 2,
-                'error': 3,
-                'xfailed': 4,
-                'xpass': 5, 
-                }
-                idx = status_map.get(get_result(case), 5)  # default XPASS/other
-                suite_summary_cases[idx] += (1 if add else -1)
-
-            def write_details_log(current_file):
-                for _, case in file_case_status.items():                        
-                    with open("details.csv", "a", encoding='utf-8') as log_file:
-                        _case_name = case.name.replace('xpu', 'cuda')
-                        _class_name = case.classname.replace('XPU', 'CUDA')
-
-                        if case.result and  isinstance(case.result[0], Skipped):
-                            _message = case.result[0].message
-                            log_file.write(f"\"{current_file}\"|\"{_class_name}\"|\"{_case_name}\"|\"{case.classname}\"|\"{case.name}\"|\"{get_result(case)}\"|\"{_message}\"|\n")
-                        else:
-                            log_file.write(f"\"{current_file}\"|\"{_class_name}\"|\"{_case_name}\"|\"{case.classname}\"|\"{case.name}\"|\"{get_result(case)}\"||\n")
-
-
-            def update_suite_summary(current_file: str, suite_summary_cases:list):
-                suite_summary = {
-                    'Category': category,
-                    'UT': current_file,
-                    'Test cases': len(file_case_status),
-                    'Passed': suite_summary_cases[1] + suite_summary_cases[4],
-                    'Skipped': suite_summary_cases[0],
-                    'Failures': suite_summary_cases[2] + suite_summary_cases[5],
-                    'Errors': suite_summary_cases[3],
-                    'Source': 'XML'
-                }
-                summaries.append(suite_summary)
-
-                # Update category totals
-                category_totals[category]['Test cases'] += suite_summary['Test cases']
-                category_totals[category]['Passed'] += suite_summary['Passed']
-                category_totals[category]['Skipped'] += suite_summary['Skipped']
-                category_totals[category]['Failures'] += suite_summary['Failures']
-                category_totals[category]['Errors'] += suite_summary['Errors']
-
-
-            def record_file_case_status(case):
-                if f'{case.classname}.{case.name}' not in file_case_status.keys():
-                    file_case_status[f'{case.classname}.{case.name}'] = case
-                    count_cases(case, True)
-                else:
-                    # duplicated case
-                    case0 = file_case_status[f'{case.classname}.{case.name}']
-                    if get_result(case0) == 'passed':
-                        #if get_result(case) == 'passed':
-                        #    print(f"unexpected passed case with {current_file} {case.classname}.{case.name}")
-                        return
-                    elif get_result(case0) != 'passed' and get_result(case) == 'passed':
-                        # if re-running tests, only keep the latest passed result
-                        file_case_status[f'{case.classname}.{case.name}'] = case
-                        count_cases(case0, False)
-                        count_cases(case, True)
-
-            if len(current_file) == 0:
-                #print(f"current_file {current_file}, {ut}")
-                current_file = ut
-            elif len(current_file) > 0 and current_file != ut:
-                #print(f"current_file {current_file}, {ut}, write")
-                write_details_log(current_file)
-                #print(suite_summary_cases)
-                update_suite_summary(current_file, suite_summary_cases)
-                suite_summary_cases = [0, 0, 0, 0, 0, 0]
-                file_case_status.clear()
-                current_file = ut
+                ut = map_log_to_pytest_path(log_file)
             #else:
-            #    print(f"current_file {current_file}, {ut}, duplicated")
+            #    ut = map_log_to_pytest_path2(log_file)
+
+            import re
+
+            def parse_collection_stats(text):
+                """
+                Parse collection statistics from text like:
+                "collecting ... collected 225 items / 225 deselected / 0 selected"
+                """
+                #pattern = r'collecting \.\.\. collected (\d+) items / (\d+) deselected / (\d+) selected'
+                pattern = r'collected (\d+) item? / (\d+) deselected / (\d+) selected'
+                match = re.search(pattern, text)
+               
+                if match:
+                    total = int(match.group(1))
+                    deselected = int(match.group(2))
+                    selected = int(match.group(3))
+                    
+                    return {
+                        'total': total,
+                        'deselected': deselected,
+                        'selected': selected
+                    }
+
+                pattern2 = r'collected (\d+) item?'
+                match = re.search(pattern2, text)
+ 
+                if match:
+                    total = int(match.group(1))
+                    return {
+                        'total': total,
+                        'deselected': 0,
+                        'selected': 0 
+                    }
 
 
-            for suite in xml:
-                if isinstance(suite, TestSuite):
-                    #print("get a suite")
-                    for case in suite:
-                        if get_result(case) not in ["passed", "skipped"]:
-                            case._file_category = category
-                            failures.append(case)
-                        elif get_result(case) == "passed":
-                            case._file_category = category
-                            passed_cases.append(case)
-                            passed_by_category[category].append(case)    
-                        
-                        record_file_case_status(case)
-                elif isinstance(suite, TestCase):
-                    #print("get a case")
-                    case = suite
-                    record_file_case_status(case)
-
+                return None
+            
+ 
+            with open(log_file, 'r') as file:
+                lines = file.readlines()
+                for line in lines:
+                    line = line.strip()
+                    if parse_collection_stats(line) is not None: 
+                        if ut not in file_case_status.keys():
+                            file_case_status[ut] = {
+                                    'total': parse_collection_stats(line)['total'],                     
+                                    'deselected': parse_collection_stats(line)['deselected'],                     
+                                    'selected': parse_collection_stats(line)['selected'],
+                                    }                     
+                        #else:
+                        #    file_case_status[ut] = {
+                        #            'total': max(parse_collection_stats(line)['total'], file_case_status[ut]['total']),                     
+                        #            'deselected': max(parse_collection_stats(line)['deselected'], file_case_status[ut]['deselected']),                   
+                        #            'selected': max(parse_collection_stats(line)['selected'], file_case_status[ut]['selected']),                     
+                        #            }
+ 
+            
         except Exception as e:
-            print(f"Error processing {xml_file}: {e}", file=sys.stderr)
-    #print("End")
-    write_details_log(current_file)
-    update_suite_summary(current_file, suite_summary_cases)
+            print(f"Error processing {log_file}: {e}", file=sys.stderr)
 
+    #print(file_case_status)
+    print(f"Testfile,total,deselected,selected")
+    for key in file_case_status.keys():
+        value = file_case_status[key]
+        print(f"{key},{value['total']},{value['deselected']},{value['selected']}")
 
 def generate_passed_log():
     if not passed_cases:
@@ -505,9 +462,10 @@ def print_summary():
     print_md_row(totals)
 
 def main():
-    input_files = sorted(args.input_files, key=lambda x: x.rsplit('-', 1)[0])
+    # 1.1_bc2b5fe9e73cade3_.log 
+    input_files = sorted(args.input_files, key=lambda x: x.rsplit('_', 3)[0])
     #print(input_files)
-    process_xml_file(input_files)
+    process_logs(input_files)
     # for input_file in input_files:
     #     if input_file.endswith('.log'):
     #         process_log_file(input_file)
@@ -522,7 +480,7 @@ def main():
     #generate_failures_log()
     #generate_passed_log()
     #generate_category_totals_log()
-    print_summary()
+    #print_summary()
 
 
 if __name__ == "__main__":
