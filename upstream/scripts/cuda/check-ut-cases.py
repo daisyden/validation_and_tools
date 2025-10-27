@@ -349,8 +349,8 @@ def process_xml_file(xml_files):
             def write_details_log(current_file):
                 for _, case in file_case_status.items():                        
                     with open("details.csv", "a", encoding='utf-8') as log_file:
-                        _case_name = case.name.replace('xpu', 'cuda')
-                        _class_name = case.classname.replace('XPU', 'CUDA')
+                        _case_name = case.name.lower().replace('xpu', 'cuda')
+                        _class_name = case.classname.lower().replace('xpu', 'cuda')
 
                         if case.result and  isinstance(case.result[0], Skipped):
                             _message = case.result[0].message

@@ -2,7 +2,7 @@ import os
 import argparse
 import pandas as pd
 
-def merge(f1: str, f2: str, output: str):
+def merge(f1: str, f2: str, output: str, matching: str):
     backend1 = os.path.basename(f1).split('.')[0]
     backend2 = os.path.basename(f2).split('.')[0]
 
@@ -31,7 +31,7 @@ def merge(f1: str, f2: str, output: str):
     # Merge sequentially
     merged_df = pd.merge(df1, df2, on='Testfile', how='outer')
 
-    substring = '/inductor/'
+    substring = matching 
     merged_df = merged_df[merged_df.iloc[:, 0].str.contains(substring, na=False)]
     
     print("Merge completed!")
@@ -43,9 +43,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='merge two .csv files of different workflow')
     parser.add_argument('--f1', default='data/summary/cuda.csv', help='The reference summary file, default is data/summary/cuda.csv')
     parser.add_argument('--f2', default='data/summary/stock_xpu.csv', help='The 2nd summary is for stock pytorch xpu backend by default, default is data/summary/stock_xpu.csv')
+    parser.add_argument('--match', default='/inductor/', help='The string for filter, default is /inductor/')
+
     parser.add_argument('-o', '--output', default='merged_inductor.csv', help='The output csv file (default: merged_inductor.csv)')
 
     args = parser.parse_args()
 
-    merge(args.f1, args.f2, args.output)
+    merge(args.f1, args.f2, args.output, args.match)
  

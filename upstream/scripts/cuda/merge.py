@@ -59,11 +59,17 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str):
 
     df_c = df_c.rename(columns={df_c.columns[0]: 'Testfile', df_c.columns[1]: f"total", df_c.columns[2]: f"deselected", df_c.columns[3]: f"selected" })
     merged_df = pd.merge(merged_df, df_c, on='Testfile', how='outer')
-
+    
     # Fill NaN values with 0 and convert to integers
     for col in merged_df.columns:
         if col != "Testfile":
             merged_df[col] = merged_df[col].fillna(0).astype(int)
+
+    merged_df['refined_stock_xpu'] = merged_df.apply(lambda row: row['stock_xpu-total'] if row['stock_xpu-total'] > row['total'] else row['total'], axis=1)
+    merged_df['XPU-total'] = merged_df.apply(lambda row: row['refined_stock_xpu'] if row['xpu-ops-total'] == 0 else row['xpu-ops-total'], axis=1)
+    merged_df['XPU-PASSED'] = merged_df.apply(lambda row: row['stock_xpu-PASSED'] if row['xpu-ops-PASSED'] == 0 else row['xpu-ops-PASSED'], axis=1)
+    merged_df['XPU-Skipped'] = merged_df.apply(lambda row: row['stock_xpu-Skipped'] if row['xpu-ops-Skipped'] == 0 else row['xpu-ops-Skipped'], axis=1)
+
  
     merged_df.to_csv(output, index=False)
 

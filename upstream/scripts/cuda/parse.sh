@@ -1,6 +1,8 @@
 set -x
 root=$(pwd)
 backend=$1
+data=$2
+
 find ./${backend} -name "*.zip" -print0 | while IFS= read -r -d '' zipfile; do
     if [[ "$zipfile" =~ distributed_weekly ]];then
            continue
@@ -41,7 +43,7 @@ else
 	python ./check-ut-cases.py xml/*.xml 2>&1|tee $(basename $backend).csv
 fi
 
-mv $(basename $backend).csv data/summary/.
-mv details.csv data/cases/details_$(basename $backend).csv
+mv $(basename $backend).csv ${data}/summary/.
+mv details.csv ${data}/cases/details_$(basename $backend).csv
 
 set +x

@@ -1,6 +1,12 @@
+import argparse
 import pandas as pd
 import os
 from glob import glob
+
+parser = argparse.ArgumentParser(description='Gen excel')
+parser.add_argument('--path', default='data/report', help='the path to .csv files')
+args = parser.parse_args()
+
 
 def csv_to_excel_with_sheets(csv_folder, output_file):
     """
@@ -17,6 +23,7 @@ def csv_to_excel_with_sheets(csv_folder, output_file):
     # Create Excel writer
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         for csv_file in csv_files:
+            print(csv_file)
             # Get filename without extension for sheet name
             sheet_name = os.path.splitext(os.path.basename(csv_file))[0]
             
@@ -27,4 +34,4 @@ def csv_to_excel_with_sheets(csv_folder, output_file):
     print(f"Created {output_file} with {len(csv_files)} sheets")
 
 # Usage
-csv_to_excel_with_sheets('./data/report', 'merged_data.xlsx')
+csv_to_excel_with_sheets(args.path, 'merged_data.xlsx')
