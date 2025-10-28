@@ -6,12 +6,13 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str):
     backend1 = os.path.basename(f1).split('.')[0]
     backend2 = os.path.basename(f2).split('.')[0]
     backend3 = os.path.basename(f3).split('.')[0]
+    backend4 = os.path.basename(f4).split('.')[0]
 
     # Read all 4 CSV files
     df1 = pd.read_csv(f1, delimiter='|', engine='python')
     df2 = pd.read_csv(f2, delimiter='|', engine='python')
     df3 = pd.read_csv(f3, delimiter='|', engine='python')
-    df4 = pd.read_csv(f4)
+    df4 = pd.read_csv(f4, delimiter='|', engine='python')
 
     if len(df1) > 0 and df1.iloc[-1, 1] == "**Total**" :  # iloc[-1, 1] gets last row, 2nd column
         df1 = df1.iloc[:-1]
@@ -19,14 +20,14 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str):
         df2 = df2.iloc[:-1]
     if len(df3) > 0 and df3.iloc[-1, 1] == "**Total**" :  # iloc[-1, 1] gets last row, 2nd column
         df3 = df3.iloc[:-1]
-    if len(df4) > 0 and df4.iloc[-1, 1] == " **Total** " :  # iloc[-1, 1] gets last row, 2nd column
+    if len(df4) > 0 and df4.iloc[-1, 1] == "**Total**" :  # iloc[-1, 1] gets last row, 2nd column
         df4 = df4.iloc[:-1]
- 
 
     df1 = df1[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
     df2 = df2[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
     df3 = df3[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
-    df4 = df4[[" Testfile ", " Test cases ", " Passed ", " Skipped ", " Failures "]]
+    df4 = df4[["UT", "Test cases", "Passed", "Skipped", "Failures"]]
+    #df4 = df4[[" Testfile ", " Test cases ", " Passed ", " Skipped ", " Failures "]]
     
     # Rename columns to avoid conflicts
     df1 = df1.rename(columns={df1.columns[0]: 'Testfile', df1.columns[1]: f"{backend1}-total", df1.columns[2]: f"{backend1}-PASSED", df1.columns[3]: f"{backend1}-Skipped", df1.columns[4]: f"{backend1}-Failed"})

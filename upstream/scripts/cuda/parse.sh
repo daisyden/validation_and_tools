@@ -37,7 +37,7 @@ find ./${backend} -name "*.xml" -print0 |while IFS= read -r -d '' xmlfile; do
     cp $xmlfile xml/.
 done
 
-if [ "$backend" = "xpu/xpu-ops" ];then
+if [ "$backend" = "xpu/xpu-ops" ] || [ "$backend" = "xpu/distributed" ];then
 	python ./check-ut-cases.py -p ops xml/*.xml 2>&1|tee $(basename $backend).csv
 else
 	python ./check-ut-cases.py xml/*.xml 2>&1|tee $(basename $backend).csv

@@ -302,8 +302,12 @@ def process_xml_file(xml_files):
                 # Remove .xml extension
                 name_without_ext = xml_filename.replace('.xml', '')
                 name_without_ext = name_without_ext.replace('_xpu.py', '.py')
-                name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_', '')
-                
+
+                if "op_ut_with_skip_test_distributed_" in name_without_ext:
+                    name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_test_distributed_', 'distributed_')
+                else:
+                    name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_', '')
+               
                 pos = name_without_prefix.find('test_')
                 if pos > 0:
                     folders = name_without_prefix[:pos-1]
@@ -311,15 +315,28 @@ def process_xml_file(xml_files):
                     folders = '' 
 
                 test_file = name_without_prefix[pos:]
-                # Split by dots to get folder structure
+                # Split by _ to get folder structure
                 if len(folders) > 0:
-                    parts = folders.split('_')
-                
+                    text = folders.replace('_', '.')
+                    folders = text.replace('..', '._')
+                    parts = folders.split('.')
+               
+                    hard_coding = {
+                            "sharded/tensor": "sharded_tensor",
+                            "sharded/plan": "sharded_plan",
+                            "sharded/spec": "sharded_spec",
+                    }
+
                     # Reconstruct path
                     if len(parts) >= 1:
                         # Join folders with slashes, add .py extension
                         path_parts = parts 
-                        return 'test/' + '/'.join(path_parts) + '/' + test_file
+                        folders = 'test/' + '/'.join(path_parts) + '/' + test_file
+                        for key in hard_coding.keys():
+                            if key in folders:
+                                folders = folders.replace(key, hard_coding[key])
+                                break
+                        return folders
                 else:
                     # No folder structure, just the test file
                     return 'test/' + test_file
@@ -329,8 +346,11 @@ def process_xml_file(xml_files):
                 # Example
                 ut = map_xml_to_pytest_path(xml_file)
             else:
-                ut = map_xml_to_pytest_path2(xml_file)
-
+                if 'op_ut_with_skip' in xml_file:
+                    ut = map_xml_to_pytest_path2(xml_file)
+                else:
+                    continue
+            print(f"{xml_file}, {ut}")
 
             category = determine_category(ut)
 
@@ -351,6 +371,8 @@ def process_xml_file(xml_files):
                     with open("details.csv", "a", encoding='utf-8') as log_file:
                         _case_name = case.name.lower().replace('xpu', 'cuda')
                         _class_name = case.classname.lower().replace('xpu', 'cuda')
+                        if "third_party" in _class_name or "distributed" in _class_name:
+                            _class_name = _class_name.split('.')[-1]
 
                         if case.result and  isinstance(case.result[0], Skipped):
                             _message = case.result[0].message
