@@ -9,6 +9,12 @@ commands = []
 traces = []
 id = 0
 
+env_info = ""
+import os
+if os.path.exists(f'collect_env.py'):
+    import subprocess
+    env_info = subprocess.check_output(['python', 'collect_env.py']).decode()
+
 for group in df.groupby(['ErrorMessage']):
     for row in group[1].itertuples(index=False):
         test_class = row.Class.strip()
@@ -29,9 +35,9 @@ for group in df.groupby(['ErrorMessage']):
                     error = testcase.find('error')
                     failure = testcase.find('failure')
                     if error is not None:
-                        traces.append(pytest_command + "\n" + error.text)
+                        traces.append(f"\n```\nCommand: {pytest_command}\n{error.text}```")
                     elif failure is not None:
-                        traces.append(pytest_command + "\n" + failure.text)
+                        traces.append(f"\n```\nCommand: {pytest_command}\n{failure.text}```")
                     else:
                         traces.append('')
                     break
@@ -39,8 +45,6 @@ for group in df.groupby(['ErrorMessage']):
             traces.append('')
 
     with open(f'issues/issue_group{id}.txt', 'w') as f:
-        import pdb
-        pdb.set_trace()
         f.write(f"Title: [Upstream] {group[0][0]}\n")
 
         cases = '\n'.join(skipped)
@@ -49,6 +53,9 @@ for group in df.groupby(['ErrorMessage']):
         commands_str = '\n'.join(commands)
         f.write(f"\npytest_command:\n{commands_str}\n")
         
-        f.write("\nTrace:\n")
+        f.write("\nTrace Example:\n")
         f.write(traces[-1])
+
+        f.write(f"\n\nEnvironment Information:\n{env_info}\n")
+
     id += 1
