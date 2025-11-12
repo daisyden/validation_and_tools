@@ -26,8 +26,8 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str, matching: str, notmat
 
     df1 = df1.rename(columns={df1.columns[0]: 'Testfile', df1.columns[1]: 'Class_unified', df1.columns[2]: 'Testcase_unified', df1.columns[3]: 'Class', df1.columns[4]: 'Testcase', df1.columns[5]: 'Result', df1.columns[6]: 'SkipReason'})
     df2 = df2.rename(columns={df2.columns[0]: 'Testfile', df2.columns[1]: 'Class_unified', df2.columns[2]: 'Testcase_unified', df2.columns[3]: 'Class-stock-xpu', df2.columns[4]: 'Testcase-stock-xpu', df2.columns[5]: 'Result-stock-xpu', df2.columns[6]: 'SkipReason-stock-xpu'})
-    import pdb
-    pdb.set_trace()
+    # import pdb
+    # pdb.set_trace()
     df3 = df3.rename(columns={df3.columns[0]: 'Testfile', df3.columns[1]: 'Class_unified', df3.columns[2]: 'Testcase_unified', df3.columns[3]: 'Class-xpu-ops', df3.columns[4]: 'Testcase-xpu-ops', df3.columns[5]: 'Result-xpu-ops', df3.columns[6]: 'SkipReason-xpu-ops'})
     df4 = df4.rename(columns={df4.columns[0]: 'Testfile', df4.columns[1]: 'Class_unified', df4.columns[2]: 'Testcase_unified', df4.columns[3]: 'Class-xpu-ops', df4.columns[4]: 'Testcase-xpu-ops', df4.columns[5]: 'Result-xpu-ops', df4.columns[6]: 'SkipReason-xpu-ops'})
     #df3['Class_unified'] = df3['Class_unified'].str.split('.').str[-1]  

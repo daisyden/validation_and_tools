@@ -306,8 +306,10 @@ def process_xml_file(xml_files):
                 if "op_ut_with_skip_test_distributed_" in name_without_ext:
                     name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_test_distributed_', 'distributed_')
                 else:
-                    name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_', '')
-               
+                    name_without_ext1 = name_without_ext.replace('xml/op_ut_with_skip_', '')
+                    name_without_ext1 = name_without_ext1.replace('xml/op_ut_with_all_', '')
+                    name_without_prefix = name_without_ext1.replace('xml/op_ut_with_exe_', '')
+
                 pos = name_without_prefix.find('test_')
                 if pos > 0:
                     folders = name_without_prefix[:pos-1]
@@ -346,11 +348,11 @@ def process_xml_file(xml_files):
                 # Example
                 ut = map_xml_to_pytest_path(xml_file)
             else:
-                if 'op_ut_with_skip' in xml_file:
+                if 'op_ut_with_' in xml_file:
                     ut = map_xml_to_pytest_path2(xml_file)
                 else:
                     continue
-            print(f"{xml_file}, {ut}")
+            # print(f"{xml_file}, {ut}")
 
             category = determine_category(ut)
 
@@ -369,8 +371,8 @@ def process_xml_file(xml_files):
             def write_details_log(current_file):
                 for _, case in file_case_status.items():                        
                     with open("details.csv", "a", encoding='utf-8') as log_file:
-                        _case_name = case.name.lower().replace('xpu', 'cuda')
-                        _class_name = case.classname.lower().replace('xpu', 'cuda')
+                        _case_name = case.name.lower().replace('xpu', 'gpu').replace('cuda', 'gpu')
+                        _class_name = case.classname.lower().replace('xpu', 'gpu').replace('cuda', 'gpu')
                         if "third_party" in _class_name or "distributed" in _class_name:
                             _class_name = _class_name.split('.')[-1]
 

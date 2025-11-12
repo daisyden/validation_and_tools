@@ -3,33 +3,13 @@ root=$(pwd)
 backend=$1
 data=$2
 
-find ./${backend} -name "*.zip" -print0 | while IFS= read -r -d '' zipfile; do
-    if [[ "$zipfile" =~ distributed_weekly ]];then
-           continue
-    fi 
-    if [[ "$zipfile" =~ torch-xpu-ops ]];then
-           continue
-    fi 
-
-    echo $zipfile
-    echo "Processing: $zipfile"
-
-    dirname="${zipfile%.zip}"
-    basename=$(basename $zipfile .zip)
-    workflow=$(echo "$dirname" | awk -F'/' '{print $(NF-1)}')
-    if [ -d $dirname ];then
-            rm -rf $dirname
-    fi
-    mkdir -p "$dirname"
-    unzip -o -q "$zipfile" -d "$dirname"
-done
 
 if [ -d "xml" ];then
 	rm -rf xml
 fi
 
-rm *.log
-rm *.csv
+rm -f *.log
+rm -f *.csv
 
 mkdir -p xml
 
