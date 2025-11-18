@@ -24,16 +24,17 @@ def download_all_open_issues_to_file(repo:str, token:str, xpu_issues_folder:str)
     for issue in issues:
         import os
         if os.path.exists(f"{xpu_issues_folder}/{issue.number}.txt"):
-            print(f"Issue #{issue.number} already downloaded.")
+            #print(f"Issue #{issue.number} already downloaded.")
             continue
         content = download_issue_content(issue)
         with open(f"{xpu_issues_folder}/{issue.number}.txt", "w", encoding="utf-8") as f:
             f.write(f"Issue #{issue.number}: {issue.title}\n")
             f.write(content)
             f.write("\n" + "="*80 + "\n\n")
+            print(f"Downloaded issue #{issue.number} to file.")
 
 def get_duplicated_issues(id: str, skipped:list, error_message:str, trace:str, issue_folder:str, ratio: float):
-    print(f"\n\n### Checking duplicated issues for group {id} with {error_message} on {skipped}...")
+    print(f"\n\n### Checking duplicated issues for group {id} with {error_message} ...\n")
     duplicated_issues = []
     import os, re
 
@@ -45,7 +46,7 @@ def get_duplicated_issues(id: str, skipped:list, error_message:str, trace:str, i
         patterns = {
             'assertion_error': r'AssertionError:?(.*)',
             'runtime_error': r'RuntimeError:?(.*)',
-            'traceback': r'Traceback \(most recent call last\):\n(?:.*\n)*?(?:\w+Error:.*)',
+            #'traceback': r'Traceback \(most recent call last\):\n(?:.*\n)*?(?:\w+Error:.*)',
             'any_python_error': r'^\w+Error:.*$',
             'exception': r'Exception:?(.*)',
             'value_error': r'ValueError:?(.*)',
@@ -53,6 +54,7 @@ def get_duplicated_issues(id: str, skipped:list, error_message:str, trace:str, i
             'index_error': r'IndexError:?(.*)',
             'key_error': r'KeyError:?(.*)',
             'import_error': r'ImportError:?(.*)',
+            'crash': r'(.*)crash(.*)',
         }
         
         errors = {}
@@ -67,14 +69,14 @@ def get_duplicated_issues(id: str, skipped:list, error_message:str, trace:str, i
     for issue_file in os.listdir(issue_folder):
         issue_file = os.path.join(issue_folder, issue_file)
         issue_file_id = issue_file.split('/')[-1].split('.')[0]
-        print(f"Checking issue file {issue_file_id}...")
+        print(f"## Checking issue file {issue_file_id}...")
         if issue_file.endswith(".txt") and issue_file_id != f"issue_group{id}":
             with open(issue_file, "r", encoding="utf-8") as f:
                 content = f.read()
                 # extract match with test_file, test_case and error message
                 for skip in skipped:
-                    if skip in content and "skipped: Yes" in content:
-                        print(f"Skipping {skip} of issue_group{id} as it is marked skipped in {issue_file}")
+                    if skip in content and "Skipped: Yes" in content:
+                        print(f"# Skipping {skip} of issue_group{id} as it is marked skipped in {issue_file}")
                         duplicated_issues.append(issue_file_id)
                     else:
                         _test_file = '/'.join(skip.split(',')[1].split('.')[:-1])
@@ -96,12 +98,13 @@ def get_duplicated_issues(id: str, skipped:list, error_message:str, trace:str, i
 
                 for error_type in errors.keys():
                     if similar(error_message, f"{error_type}: {errors[error_type][0]}") > ratio:
-                        print(f"\n* Found similar error message in issue {issue_file_id} with issue_group{id}: \n{error_type}: {errors[error_type][0]}\n.vs\n{error_message} \nsimilarity ratio is {similar(error_message, f'{error_type}: {errors[error_type][0]}')}")
+                        print(f"\n# Found similar error message in issue {issue_file_id} with issue_group{id}: {error_type}: {errors[error_type][0]}    .vs    {error_message} \nsimilarity ratio is {similar(error_message, f'{error_type}: {errors[error_type][0]}')}")
                         duplicated_issues.append(issue_file_id)
                     else:
-                        print(f"\n* No similar error message in issue {issue_file_id} with issue_group{id}: \n{error_type}: {errors[error_type][0]}\n.vs\n{error_message} similarity ratio is {similar(error_message, f'{error_type}: {errors[error_type][0]}')}")
+                        print(f"\n# No similar error message in issue {issue_file_id} with issue_group{id}: {error_type}: {errors[error_type][0]}    .vs    {error_message} similarity ratio is {similar(error_message, f'{error_type}: {errors[error_type][0]}')}")
 
-    print(f"Duplicated issues for group {id}: {duplicated_issues}")
+    print(f"## Duplicated issues for group {id}: {duplicated_issues}")
+    print("########################################\n\n")
     return duplicated_issues
 
 
