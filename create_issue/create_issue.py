@@ -13,26 +13,25 @@ class FailureGroup:
     duplicated: list[str]
     new_duplicated: list[str]
 
-def write_issue_file(failure_group: FailureGroup, error_message: str, env_info: str, issue_folder: str):
+def write_issue_file(failure_group: FailureGroup, error_message: str, issue_folder: str):
     filename = f'{issue_folder}/issue_group{failure_group.id}.txt'
     with open(filename, 'w') as f:
         if "test/xpu" in failure_group.skipped[0] or "xpu.py" in failure_group.skipped[0]:
-            f.write(f"Title: [ut] {error_message}\n")
+            f.write(f"Title: [ut] {error_message[:min(100, len(error_message))]}\n")
         else:
-            f.write(f"Title: [upstream_ut] {error_message}\n")
+            f.write(f"Title: [upstream_ut] {error_message[:min(100, len(error_message))]}\n")
         
         cases = '\n'.join(failure_group.skipped)
         f.write(f"Cases:\n{cases}\n")
         
         commands_str = '\n'.join(failure_group.commands)
         f.write(f"\npytest_command:\n{commands_str}\n")
+
+        f.write(f"\nError Message:\n{error_message}\n")
         
         f.write("\nTrace Example:\n")
         f.write(failure_group.tracees[-1])
 
-        if len(env_info):
-            f.write("\n\nVersions:\n"
-                    f"{env_info}\n")
     print(f"Wrote issue file: {filename}")
 
 
@@ -160,11 +159,11 @@ def main():
         # If check known issues download xpu-ops issues first
         download_all_open_issues_to_file("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"), xpu_issues_folder)
 
-    env_info = ""
-    import os
-    if os.path.exists(f'collect_env.py'):
-        import subprocess
-        env_info = subprocess.check_output(['python', 'collect_env.py']).decode()
+    # env_info = ""
+    # import os
+    # if os.path.exists(f'collect_env.py'):
+    #     import subprocess
+    #     env_info = subprocess.check_output(['python', 'collect_env.py']).decode()
 
     id = 0
     failure_group_list = []
@@ -183,7 +182,7 @@ def main():
                     pytest_command = f"cd <pytorch>/third_party/test/xpu"
             else:
                 pytest_command = f"cd <pytorch>"
-            pytest_command += " && PYTORCH_TEST_WITH_SLOW=1 pytest -v {test_file} -k {test_case}"
+            pytest_command += f" && PYTORCH_TEST_WITH_SLOW=1 pytest -v {test_file} -k {test_case}"
             failure_group.skipped.append(line)
             failure_group.commands.append(pytest_command)
             xml_file = _test_file + '.xml'
@@ -206,7 +205,7 @@ def main():
                 failure_group.tracees.append('')
 
         # dump the basic issue information to a file group by error message
-        write_issue_file(failure_group, group[0][0], env_info, issues_folder)
+        write_issue_file(failure_group, group[0][0], issues_folder)
 
         failure_group_list.append(failure_group)
 
@@ -227,7 +226,7 @@ def main():
         # Write final issues
         for fg in failure_group_list:
             # Dump the merge issue groups
-            write_issue_file(fg, fg.error_msg, env_info, merged_issues_folder)
+            write_issue_file(fg, fg.error_msg, merged_issues_folder)
             if args.known:
                 # Find duplicated issues of xpu-ops repo
                 fg.duplicated = get_duplicated_known_issues(fg, fg.error_msg, xpu_issues_folder, args.ratio)
