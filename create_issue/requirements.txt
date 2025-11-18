@@ -1,0 +1,4 @@
+PyGithub
+faiss-cpu
+junitparser
+pandas
