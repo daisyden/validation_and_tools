@@ -274,6 +274,15 @@ def process_xml_file(xml_files):
             xml = JUnitXml.fromfile(xml_file)
             ut = os.path.basename(xml_file).split('.')[0]
 
+            def replace_underscores_between(text, start_str, end_str):
+                start_escaped = re.escape(start_str)
+                end_escaped = re.escape(end_str)
+                pattern = f'({start_escaped})(.*?)({end_escaped})'
+                def replace_underscores(match):
+                    return match.group(1) + match.group(2).replace('_', '/') + match.group(3)
+                output = re.sub(pattern, replace_underscores, text)
+                return output.replace('test_distributed', 'distributed').replace('_test_', '/test_').replace('//', '/_')
+
             def map_xml_to_pytest_path(xml_filename):
                 # Remove .xml extension
                 xml_filename = xml_filename.replace('xml/', '')
@@ -303,12 +312,10 @@ def process_xml_file(xml_files):
                 name_without_ext = xml_filename.replace('.xml', '')
                 name_without_ext = name_without_ext.replace('_xpu.py', '.py')
 
-                if "op_ut_with_skip_test_distributed_" in name_without_ext:
-                    name_without_prefix = name_without_ext.replace('xml/op_ut_with_skip_test_distributed_', 'distributed_')
+                if re.search(name_without_ext, r"op_ut_with_[a-z]+.test_distributed_"):
+                    name_without_prefix = re.sub(r'xml/op_ut_with_[a-z]+.test_distributed_', 'distributed_', name_without_ext)
                 else:
-                    name_without_ext1 = name_without_ext.replace('xml/op_ut_with_skip_', '')
-                    name_without_ext1 = name_without_ext1.replace('xml/op_ut_with_all_', '')
-                    name_without_prefix = name_without_ext1.replace('xml/op_ut_with_exe_', '')
+                    name_without_prefix = re.sub(r'xml/op_ut_with_[a-z]+.', '', name_without_ext)
 
                 pos = name_without_prefix.find('test_')
                 if pos > 0:
@@ -338,10 +345,10 @@ def process_xml_file(xml_files):
                             if key in folders:
                                 folders = folders.replace(key, hard_coding[key])
                                 break
-                        return folders
+                        return replace_underscores_between(folders, "test_distributed", "_test_")
                 else:
                     # No folder structure, just the test file
-                    return 'test/' + test_file
+                    return replace_underscores_between('test/' + test_file, "test_distributed", "_test_")
 
 
             if args.p == "upstream":  

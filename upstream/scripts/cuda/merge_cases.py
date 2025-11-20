@@ -36,10 +36,9 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str, matching: str, notmat
 
     # Merge sequentially
     merged_df = pd.merge(df1, df2, on=['Testfile', 'Class_unified', 'Testcase_unified'], how='outer')
-    merged_df = pd.merge(df1, df2, on=['Testfile', 'Class_unified', 'Testcase_unified'], how='outer')
     merged_df = pd.merge(merged_df, df3, on=['Testfile', 'Class_unified', 'Testcase_unified'], how='outer')
 
-    merged_df['xpu-ops tested'] = merged_df['Testfile'].isin(df3['Testfile']).map({True: 'yes', False: 'no'})
+    # merged_df['xpu-ops tested'] = merged_df['Testfile'].isin(df3['Testfile']).map({True: 'yes', False: 'no'})
     #merged_df['owern'] = ('test/distributed' in merged_df['Testfile']).map({True: 'Cherry', False: ''})
 
 
@@ -69,17 +68,22 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str, matching: str, notmat
         print(f"Successfully created {num_parts} files")
 
     # Usage
-    split_with_progress(merged_df, 4, output)
+    # split_with_progress(merged_df, 4, output)
+    merged_df.to_csv(output, index=False)
 
     #mask = merged_df['Result-XPU'].isin(['skipped', '']) | merged_df['Result-XPU'].isna()
-    mask = ((merged_df['Result-stock-xpu'].isin(['skipped', '']) | merged_df['Result-stock-xpu'].isna()) & (merged_df['Result-xpu-ops'].isin(['skipped', '']) | merged_df['Result-xpu-ops'].isna()))
+    condition1 = (merged_df['Result-stock-xpu'] != 'passed') | (merged_df['Result-stock-xpu'].isna())
+    condition2 = (merged_df['Result-xpu-ops'] != 'passed') | (merged_df['Result-xpu-ops'].isna())
+    mask = condition1 & condition2
     filtered_df = merged_df[mask]
     filtered_df.to_csv(f"xpu_all_skipped.csv", index=False)
 
-   
-    mask = (merged_df['Result'] == 'passed') & ((merged_df['Result-stock-xpu'].isin(['skipped', '']) | merged_df['Result-stock-xpu'].isna()) & (merged_df['Result-xpu-ops'].isin(['skipped', '']) | merged_df['Result-xpu-ops'].isna()))
+    condition1 = merged_df['Result'] == 'passed'
+    condition2 = (merged_df['Result-stock-xpu'] != 'passed') | merged_df['Result-stock-xpu'].isna()
+    condition3 = (merged_df['Result-xpu-ops'] != 'passed') | merged_df['Result-xpu-ops'].isna()
+    mask = condition1 & condition2 & condition3
     filtered_df = merged_df[mask]
-    filtered_df.to_csv("xpu_skipped.csv", index=False)
+    filtered_df.to_csv("xpu_only_skipped.csv", index=False)
 
     #for index, row in filtered_df.iterrows():
     #    testfile = row['Testfile']
@@ -89,7 +93,6 @@ def merge(f1: str, f2: str, f3: str, f4: str, output: str, matching: str, notmat
 
     #    with open('xpu_skipped.txt', 'a') as file: 
     #        file.write(f"pytest -v {testfile} -k {testcase} \n")
-
 
 
 if __name__ == "__main__":
