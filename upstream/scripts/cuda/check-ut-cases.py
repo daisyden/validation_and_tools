@@ -313,9 +313,9 @@ def process_xml_file(xml_files):
                 name_without_ext = name_without_ext.replace('_xpu.py', '.py')
 
                 if re.search(name_without_ext, r"op_ut_with_[a-z]+.test_distributed_"):
-                    name_without_prefix = re.sub(r'xml/op_ut_with_[a-z]+.test_distributed_', 'distributed_', name_without_ext)
+                    name_without_prefix = re.sub(r'.*op_ut_with_[a-z]+.test_distributed_', 'distributed_', name_without_ext)
                 else:
-                    name_without_prefix = re.sub(r'xml/op_ut_with_[a-z]+.', '', name_without_ext)
+                    name_without_prefix = re.sub(r'.*op_ut_with_[a-z]+.', '', name_without_ext)
 
                 pos = name_without_prefix.find('test_')
                 if pos > 0:
@@ -378,8 +378,8 @@ def process_xml_file(xml_files):
             def write_details_log(current_file):
                 for _, case in file_case_status.items():                        
                     with open("details.csv", "a", encoding='utf-8') as log_file:
-                        _case_name = case.name.lower().replace('xpu', 'gpu').replace('cuda', 'gpu')
-                        _class_name = case.classname.lower().replace('xpu', 'gpu').replace('cuda', 'gpu')
+                        _case_name = re.sub(r'(?:xpu|cuda|cpu)', 'gpu', case.name, flags=re.IGNORECASE)
+                        _class_name = re.sub(r'(?:xpu|cuda|cpu)', 'gpu', case.classname, flags=re.IGNORECASE)
                         if "third_party" in _class_name or "distributed" in _class_name:
                             _class_name = _class_name.split('.')[-1]
 
