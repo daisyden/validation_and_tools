@@ -2,15 +2,17 @@ Example:
 run pytest with --junit-xml=test_ops_gradients.xml
 ```
 mkdir test
-mv test_ops_graidents.xml test/.
+# The xml file folder could be put under the same directory as test case, for example torch-xpu-ops test, put xml under third_party/torch-xpu-ops/test/xpu
+mv test_ops_graidents.xml test/.   
 python check-ut.py test/test_ops_gradients.xml
 ```
 ut_failure_list.csv will be generated
 
 Command:
 ```
-# merge issues and check duplicated issue with xpu-ops repo, ratio is the threashold to check similarity
-GITHUB_TOKEN=<token> python create_issue.py --merge True --known True --ratio 0.7
+# merge issues and check duplicated issue with xpu-ops repo, ratio is the threashold to check similarity and it is adjsutable
+# finially the merged issue will be submitted to github. Please ensure the "repo" scope is checked for your github token.
+GITHUB_TOKEN=<token> python create_issue.py --merge True --known True --ratio 0.7 --submit True
 
 # merge issues
 GITHUB_TOKEN=<token> python create_issue.py --merge True --ratio 0.7

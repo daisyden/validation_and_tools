@@ -1,7 +1,9 @@
+import os
 from attr import dataclass
 import pandas as pd
-from get_duplicated_issues.get_duplicated_issues import get_duplicated_issues, download_all_open_issues_to_file
+from get_duplicated_issues.get_duplicated_issues import get_duplicated_issues, download_all_open_issues_and_get_skiplist
 import argparse
+from get_duplicated_issues.github_issue import Github_Issue
 
 @dataclass
 class FailureGroup:
@@ -13,26 +15,39 @@ class FailureGroup:
     duplicated: list[str]
     new_duplicated: list[str]
 
-def write_issue_file(failure_group: FailureGroup, error_message: str, issue_folder: str):
+def write_issue_file(failure_group: FailureGroup, error_message: str, issue_folder: str, submit=False):
     filename = f'{issue_folder}/issue_group{failure_group.id}.txt'
     with open(filename, 'w') as f:
         if "test/xpu" in failure_group.skipped[0] or "xpu.py" in failure_group.skipped[0]:
-            f.write(f"Title: [ut] {error_message[:min(100, len(error_message))]}\n")
+            title = f"[ut] {error_message[:min(100, len(error_message))]}\n"
         else:
-            f.write(f"Title: [upstream_ut] {error_message[:min(100, len(error_message))]}\n")
-        
+            title = f"[upstream_ut] {error_message[:min(100, len(error_message))]}\n"
+    
+        f.write("Title: " + title)
+
+        content = ""
         cases = '\n'.join(failure_group.skipped)
+        content += f"\nCases:\n{cases}\n"
         f.write(f"Cases:\n{cases}\n")
         
         commands_str = '\n'.join(failure_group.commands)
+        content += f"\npytest_command:\n{commands_str}\n"
         f.write(f"\npytest_command:\n{commands_str}\n")
 
+        content += f"\nError Message:\n{error_message}\n"
         f.write(f"\nError Message:\n{error_message}\n")
         
         f.write("\nTrace Example:\n")
+        content += "\nTrace Example:\n" +  failure_group.tracees[-1]
         f.write(failure_group.tracees[-1])
 
+        if submit:
+            gh = Github_Issue("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"))
+            print(f"Wrote merged issue file: {filename}")
+            return gh.create_issue_with_label(title, body=content, labels=["skipped"])
+
     print(f"Wrote issue file: {filename}")
+    return -1
 
 
 def get_duplicated_known_issues(failure_group: FailureGroup, error_message: str, issue_folder: str, ratio: float = 0.7):
@@ -157,7 +172,7 @@ def main():
         if os.path.exists(xpu_issues_folder) is False:
             os.mkdir(xpu_issues_folder)
         # If check known issues download xpu-ops issues first
-        download_all_open_issues_to_file("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"), xpu_issues_folder)
+        download_all_open_issues_and_get_skiplist("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"), xpu_issues_folder)
 
     # env_info = ""
     # import os
@@ -226,16 +241,22 @@ def main():
         # Write final issues
         for fg in failure_group_list:
             # Dump the merge issue groups
-            write_issue_file(fg, fg.error_msg, merged_issues_folder)
+            issue_id = write_issue_file(fg, fg.error_msg, merged_issues_folder, submit=args.submit)
             if args.known:
                 # Find duplicated issues of xpu-ops repo
                 fg.duplicated = get_duplicated_known_issues(fg, fg.error_msg, xpu_issues_folder, args.ratio)
+                if args.submit and len(fg.duplicated) > 0:
+                    gh = Github_Issue("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"))
+                    duplicated_issues = [ f"#{_issue_id}" for _issue_id in fg.duplicated if _issue_id != issue_id ]
+                    gh.add_comment(f"[xpu_triage_bot]:\n Possible related issues: {duplicated_issues}", issue_id)
     
     print("\n\n### Final Failure Groups and their known duplicated issues:")
     print("issue_folder:", issues_folder if not args.merge else merged_issues_folder)
+
     if args.known:
         for fg in failure_group_list:
             print(f"Known duplicated issues for issue_group{fg.id}: {fg.duplicated}")
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create GitHub issues from UT failure list")
@@ -243,5 +264,6 @@ if __name__ == "__main__":
     parser.add_argument('--known', type=bool, default=False, help="Check known issues of torch-xpu-ops repo, set GITHUB_TOKEN with your token")
     parser.add_argument('--ai', type=bool, default=False, help="Use AI for duplicate issue detection")
     parser.add_argument('--ratio', type=float, default=0.7, help="Similarity ratio threshold for duplicate detection")
+    parser.add_argument('--submit', type=bool, default=False, help="Submit issues to GitHub")
     args = parser.parse_args()
     main()

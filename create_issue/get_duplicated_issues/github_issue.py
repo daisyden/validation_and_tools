@@ -2,6 +2,7 @@ import re
 import requests
 from github import Github
 from github import Auth
+from github.GithubException import GithubException
 import time
 import os
 import zipfile
@@ -142,10 +143,13 @@ class Github_Issue:
             return False
 
 
-    def add_comment(self, body, pr_number):
+    def add_pr_comment(self, body, pr_number):
         pull = self.repo.get_pull(pr_number)
         pull.create_issue_comment(body=body) 
 
+    def add_comment(self, body, issue_number):
+        issue = self.repo.get_issue(issue_number)
+        issue.create_comment(body=body)
 
     def parse_github_issue_attachment(self, content, output_dir):
         """
@@ -255,4 +259,42 @@ class Github_Issue:
         except Exception as e:
             print(f"Failed to download {url}: {str(e)}")
             return ""
+
+    
+
+    def create_issue_with_label(self, title, body, labels=["skipped"]):
+        try:
+            # Get repository
+            repo = self.repo
+            
+            # Check if "skipped" label exists, create if it doesn't
+            try:
+                for label in labels:
+                    repo.get_label(label)
+            except GithubException:
+                # Create the label if it doesn't exist
+                repo.create_label(
+                    name=label,
+                    color="0366d6",  # Blue color
+                    description="Skipped items or tasks"
+                )
+                print(f"Created '{label}' label")
+            
+            # Create the issue
+            issue = repo.create_issue(
+                title=title,
+                body=body,
+                labels=labels
+            )
+            
+            print(f"Issue created successfully!")
+            print(f"Title: {issue.title}")
+            print(f"URL: {issue.html_url}")
+            print(f"Labels: {[label.name for label in issue.labels]}")
+            
+            return issue.number
+            
+        except GithubException as e:
+            print(f"❌ Error creating issue: {e}")
+            return None
 
