@@ -12,10 +12,10 @@ Command:
 ```
 # merge issues and check duplicated issue with xpu-ops repo, ratio is the threashold to check similarity and it is adjsutable
 # finially the merged issue will be submitted to github. Please ensure the "repo" scope is checked for your github token.
-GITHUB_TOKEN=<token> python create_issue.py --merge True --known True --ratio 0.7 --submit True
+GITHUB_TOKEN=<token> python create_issue.py --merge --known --ratio 0.7 --submit
 
 # merge issues
-GITHUB_TOKEN=<token> python create_issue.py --merge True --ratio 0.7
+GITHUB_TOKEN=<token> python create_issue.py --merge --ratio 0.7
 
 # only generate issue according to error message
 GITHUB_TOKEN=<token> python create_issue.py 
