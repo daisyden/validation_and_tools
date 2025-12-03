@@ -132,9 +132,7 @@ class TestCase:
     time: float
 
     # Metadata
-    source_file: str
     message: str = ""
-    type: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> TestCase:
@@ -148,9 +146,7 @@ class TestCase:
             testtype=data["testtype"],
             status=TestStatus(data["status"]) if isinstance(data["status"], str) else data["status"],
             time=float(data["time"]),
-            source_file=data["source_file"],
             message=data.get("message", ""),
-            type=data.get("type", ""),
         )
 
     def to_series(self) -> pd.Series:
@@ -227,16 +223,19 @@ class FilePatternMatcher:
 
     # Test type detection patterns
     TEST_TYPE_PATTERNS = {
-        "cuda-all": [r"nvidia\.gpu", r"dgx\.b200"],
-        "xpu-dist": [r"xpu_distributed"],
+        "xpu-default": [r"-test-default-.*-linux\.idc\.xpu_"],
+        "xpu-unknown": [r"linux\.idc\.xpu_"],
+        "cuda-default": [r"-test-default-.*(nvidia\.gpu|dgx\.)"],
+        "cuda-inductor": [r"-test-inductor-.*(nvidia\.gpu|dgx\.)"],
+        "cuda-distributed": [r"-test-distributed-.*(nvidia\.gpu|dgx\.)"],
+        "cuda-unknown": [r"(nvidia\.gpu|dgx\.)"],
+        "xpu-distributed": [r"xpu_distributed"],
         "xpu-ops": [r"op_ut_with_"],
-        "xpu-stock": [r"/test-reports/"],
     }
 
     # File replacement mappings
     FILE_REPLACEMENTS = [
         ("test/test/", "test/"),
-        ("_xpu.py", ".py"),
         ("test_c10d_xccl.py", "test_c10d_nccl.py"),
         ("test_c10d_ops_xccl.py", "test_c10d_ops_nccl.py"),
     ]
@@ -260,9 +259,9 @@ class FilePatternMatcher:
             if any(pattern.search(xml_file_str) for pattern in patterns):
                 return test_type
 
-        return "xpu-xpu"
+        return "xpu-undefied"
 
-    def normalize_filepath(self, filepath: str) -> str:
+    def normalize_filepath(self, filepath: str, testtype: str) -> str:
         """Normalize test file path with replacements."""
         if not filepath:
             return "unknown_file.py"
@@ -277,9 +276,12 @@ class FilePatternMatcher:
         for old, new in self.FILE_REPLACEMENTS:
             normalized = normalized.replace(old, new)
 
+        if testtype in ['xpu-dist', 'xpu-ops']:
+            normalized = normalized.replace("_xpu_xpu.py", ".py").replace("_xpu.py", ".py")
+
         return normalized
 
-    def extract_testfile(self, classname: str, filename: str, xml_file: Path) -> str:
+    def extract_testfile(self, classname: str, filename: str, xml_file: Path, testtype: str) -> str:
         """Extract and normalize test file path."""
         # Priority 1: Use filename from XML
         if filename:
@@ -306,7 +308,7 @@ class FilePatternMatcher:
                 .replace("/xml", ".py")
             )
 
-        return self.normalize_filepath(testfile)
+        return self.normalize_filepath(testfile, testtype)
 
     def extract_classname(self, full_classname: str) -> str:
         """Extract simplified classname from full classname."""
@@ -432,16 +434,18 @@ class TestDetailsExtractor:
             name = testcase.get("name", "")
             time_str = testcase.get("time", "0")
 
+            # Determine test type
+            test_type = self.pattern_matcher.determine_test_type(xml_file)
+
             # Extract and normalize
             simplified_classname = self.pattern_matcher.extract_classname(classname)
             simplified_casename = self.pattern_matcher.extract_casename(name)
-            testfile = self.pattern_matcher.extract_testfile(classname, filename, xml_file)
+            testfile = self.pattern_matcher.extract_testfile(classname, filename, xml_file, test_type)
 
             # Generate unique identifier
             uniqname = self.pattern_matcher.generate_uniqname(testfile, simplified_classname, simplified_casename)
 
-            # Determine test type and status
-            test_type = self.pattern_matcher.determine_test_type(xml_file)
+            # Determine status
             status, message, result_type = self._determine_test_status(testcase)
             device = TestDevice.from_test_type(test_type)
 
@@ -460,9 +464,7 @@ class TestDetailsExtractor:
                 testtype=test_type,
                 status=status,
                 time=time_val,
-                source_file=str(xml_file),
                 message=message,
-                type=result_type,
             )
 
         except Exception as e:
