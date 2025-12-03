@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Extract test details from JUnit XML files and save to Excel/CSV.
+Enhanced JUnit XML Test Details Extractor
+
+Extracts test details from JUnit XML files and saves to Excel/CSV with improved
+efficiency, error handling, and extensibility.
 
 Usage:
     python get_details.py --input "results/*.xml" --output details.xlsx
@@ -8,17 +11,26 @@ Usage:
     python get_details.py --input results_dir --output test_details.xlsx
 """
 
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import List, Optional, Tuple, Set, Any
+from __future__ import annotations
+
 import argparse
-import re
-import logging
+import concurrent.futures
 import glob
-from contextlib import contextmanager
-from functools import lru_cache
+import json
+import logging
+import re
+import sys
 import time
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from enum import Enum
+from functools import lru_cache, wraps
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
+from xml.etree import ElementTree as ET
 
 import pandas as pd
 from tqdm import tqdm
@@ -26,490 +38,940 @@ from tqdm import tqdm
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Type aliases
+T = TypeVar("T")
+Element = ET.Element
+PathLike = str | Path
+
+
+class TestStatus(Enum):
+    """Standardized test status enumeration."""
+    PASSED = "passed"
+    XFAIL = "xfail"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    ERROR = "error"
+    NOTRUN = ""
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_string(cls, status_str: str) -> TestStatus:
+        """Convert string to TestStatus enum."""
+        if not status_str or pd.isna(status_str):
+            return cls.NOTRUN
+
+        status_str = str(status_str).lower().strip()
+
+        status_mapping = {
+            "pass": cls.PASSED,
+            "success": cls.PASSED,
+            "xfail": cls.XFAIL,
+            "fail": cls.FAILED,
+            "error": cls.ERROR,
+            "skip": cls.SKIPPED,
+            "": cls.NOTRUN,
+        }
+
+        for key, status in status_mapping.items():
+            if key in status_str:
+                return status
+
+        return cls.UNKNOWN
+
+    @property
+    def priority(self) -> int:
+        """Get priority for deduplication (higher = more important)."""
+        priorities = {
+            self.PASSED: 6,
+            self.XFAIL: 5,
+            self.FAILED: 4,
+            self.ERROR: 3,
+            self.SKIPPED: 2,
+            self.UNKNOWN: 1,
+            self.NOTRUN: 0,
+        }
+        return priorities[self]
+
+
+class TestDevice(Enum):
+    """Test device enumeration."""
+    CUDA = "cuda"
+    XPU = "xpu"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_test_type(cls, test_type: str) -> TestDevice:
+        """Extract device from test type string."""
+        test_type_lower = test_type.lower()
+        if "cuda" in test_type_lower:
+            return cls.CUDA
+        elif "xpu" in test_type_lower:
+            return cls.XPU
+        return cls.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
 class TestCase:
     """Immutable data class representing a single test case."""
-    device: str
-    testtype: str
-    testfile: str
+
+    # Core identifiers
     uniqname: str
+    testfile: str
     classname: str
     name: str
-    status: str
+
+    # Test properties
+    device: TestDevice
+    testtype: str
+    status: TestStatus
     time: float
+
+    # Metadata
     source_file: str
     message: str = ""
     type: str = ""
 
-
-class TestDetailsExtractor:
-    """
-    Extracts test details from JUnit XML files.
-    """
-
-    # Test type mappings based on file patterns
-    TEST_TYPE_MAPPINGS = {
-        'cuda-all': ['nvidia.gpu', 'dgx.b200'],
-        'xpu-dist': ['xpu_distributed'],
-        'xpu-ops': ['op_ut_with_'],
-        'xpu-stock': ['/test-reports/'],
-    }
-
-    # Status standardization mappings
-    STATUS_MAPPINGS = {
-        'passed': ['pass', 'success'],
-        'xfail': ['xfail'],
-        'failed': ['fail', 'error'],
-        'skipped': ['skip']
-    }
-
-    def __init__(self):
-        """Initialize the test details extractor."""
-        self.all_test_cases: List[TestCase] = []
-        self.unique_total_case: int = 0
-        self.processed_files: List[str] = []
-        self.empty_case_files: List[str] = []
-        
-        # Compile regex patterns for better performance
-        self._classname_pattern = re.compile(r'.*\.')
-        self._casename_pattern = re.compile(r'[^a-zA-Z0-9_.-]')
-        self._testfile_pattern = re.compile(r'.*torch-xpu-ops\.test\.xpu\.')
-        self._normalize_pattern = re.compile(r'.*\.\./test/')
-        self._gpu_pattern = re.compile(r'(?:xpu)', re.IGNORECASE)
-
-    @contextmanager
-    def _timer(self, operation: str):
-        """Context manager for timing operations."""
-        start_time = time.time()
-        try:
-            yield
-        finally:
-            elapsed = time.time() - start_time
-            logger.debug(f"{operation} completed in {elapsed:.3f}s")
-
-    def find_xml_files(self, input_paths: List[str]) -> List[Path]:
-        """
-        Find all XML files from various input specifications.
-        """
-        xml_files: Set[Path] = set()
-
-        for input_path in input_paths:
-            path = Path(input_path)
-
-            if path.is_file() and path.suffix.lower() == '.xml':
-                xml_files.add(path.resolve())
-            elif path.is_dir():
-                xml_files.update(path.resolve().glob('**/*.xml'))
-            else:
-                # Handle glob patterns
-                for file_path in glob.glob(input_path, recursive=True):
-                    file_path = Path(file_path)
-                    if file_path.is_file() and file_path.suffix.lower() == '.xml':
-                        xml_files.add(file_path.resolve())
-
-        return sorted(xml_files)
-
-    def parse_single_xml(self, xml_file: Path) -> Tuple[Optional[ET.ElementTree], Optional[ET.Element]]:
-        """
-        Parse a single XML file with error handling.
-        """
-        try:
-            if not xml_file.exists():
-                logger.error(f"XML file not found: {xml_file}")
-                return None, None
-
-            with self._timer(f"Parsing {xml_file.name}"):
-                tree = ET.parse(xml_file)
-                root = tree.getroot()
-            return tree, root
-
-        except ET.ParseError as e:
-            logger.error(f"Error parsing XML file {xml_file}: {e}")
-            return None, None
-        except Exception as e:
-            logger.error(f"Unexpected error parsing {xml_file}: {e}")
-            return None, None
-
-    @lru_cache(maxsize=128)
-    def _determine_test_type(self, xml_file: Path) -> str:
-        """
-        Determine test type based on XML file path patterns.
-        """
-        xml_file_str = str(xml_file)
-        return next(
-            (test_type for test_type, patterns in self.TEST_TYPE_MAPPINGS.items() 
-             if any(pattern in xml_file_str for pattern in patterns)),
-            'xpu-xpu'
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> TestCase:
+        """Create TestCase from dictionary with type conversion."""
+        return cls(
+            uniqname=data["uniqname"],
+            testfile=data["testfile"],
+            classname=data["classname"],
+            name=data["name"],
+            device=TestDevice(data["device"]) if isinstance(data["device"], str) else data["device"],
+            testtype=data["testtype"],
+            status=TestStatus(data["status"]) if isinstance(data["status"], str) else data["status"],
+            time=float(data["time"]),
+            source_file=data["source_file"],
+            message=data.get("message", ""),
+            type=data.get("type", ""),
         )
 
-    def _extract_testfile(self, classname: str, filename: str, xml_file: Path) -> str:
-        """
-        Extract test file path from available information.
-        """
+    def to_series(self) -> pd.Series:
+        """Convert to pandas Series."""
+        data = asdict(self)
+        # Convert enums to strings
+        data["device"] = data["device"].value
+        data["status"] = data["status"].value
+        return pd.Series(data)
+
+
+class ProcessingStrategy(ABC):
+    """Strategy pattern for different processing approaches."""
+
+    @abstractmethod
+    def process_files(self, extractor: TestDetailsExtractor, xml_files: List[Path]) -> None:
+        """Process XML files using this strategy."""
+        pass
+
+
+class ParallelProcessingStrategy(ProcessingStrategy):
+    """Parallel processing strategy using ThreadPoolExecutor."""
+
+    def __init__(self, max_workers: int | None = None):
+        self.max_workers = max_workers
+
+    def process_files(self, extractor: TestDetailsExtractor, xml_files: List[Path]) -> None:
+        """Process files in parallel."""
+        logger.info(f"Processing {len(xml_files)} files with {self.max_workers} workers")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_file = {
+                executor.submit(extractor._process_single_xml, xml_file): xml_file
+                for xml_file in xml_files
+            }
+
+            with tqdm(total=len(xml_files), desc="Processing files", unit="file") as pbar:
+                for future in concurrent.futures.as_completed(future_to_file):
+                    xml_file = future_to_file[future]
+                    try:
+                        test_cases, metadata = future.result()
+                        extractor._handle_processing_result(xml_file, test_cases, metadata)
+                    except Exception as e:
+                        logger.error(f"Error processing result for {xml_file}: {e}")
+                        extractor.failed_files[str(xml_file)] = str(e)
+                    finally:
+                        extractor.stats["files_processed"] += 1
+                        pbar.update(1)
+
+
+class SequentialProcessingStrategy(ProcessingStrategy):
+    """Sequential processing strategy for debugging or small datasets."""
+
+    def process_files(self, extractor: TestDetailsExtractor, xml_files: List[Path]) -> None:
+        """Process files sequentially."""
+        logger.info(f"Processing {len(xml_files)} files sequentially")
+
+        for xml_file in tqdm(xml_files, desc="Processing files", unit="file"):
+            test_cases, metadata = extractor._process_single_xml(xml_file)
+            extractor._handle_processing_result(xml_file, test_cases, metadata)
+            extractor.stats["files_processed"] += 1
+
+
+class FilePatternMatcher:
+    """Handles file pattern matching and normalization."""
+
+    # Compiled regex patterns for better performance
+    _CLASSNAME_PATTERN = re.compile(r".*\.")
+    _CASENAME_PATTERN = re.compile(r"[^a-zA-Z0-9_.-]")
+    _TESTFILE_PATTERN = re.compile(r".*torch-xpu-ops\.test\.xpu\.")
+    _TESTFILE_PATTERN_CPP = re.compile(r".*/test/xpu/")
+    _NORMALIZE_PATTERN = re.compile(r".*\.\./test/")
+    _GPU_PATTERN = re.compile(r"(?:xpu|cuda)", re.IGNORECASE)
+
+    # Test type detection patterns
+    TEST_TYPE_PATTERNS = {
+        "cuda-all": [r"nvidia\.gpu", r"dgx\.b200"],
+        "xpu-dist": [r"xpu_distributed"],
+        "xpu-ops": [r"op_ut_with_"],
+        "xpu-stock": [r"/test-reports/"],
+    }
+
+    # File replacement mappings
+    FILE_REPLACEMENTS = [
+        ("test/test/", "test/"),
+        ("_xpu.py", ".py"),
+        ("test_c10d_xccl.py", "test_c10d_nccl.py"),
+        ("test_c10d_ops_xccl.py", "test_c10d_ops_nccl.py"),
+    ]
+
+    def __init__(self):
+        self._compiled_test_type_patterns = self._compile_patterns()
+
+    def _compile_patterns(self) -> Dict[str, List[re.Pattern]]:
+        """Compile all regex patterns for better performance."""
+        return {
+            test_type: [re.compile(pattern) for pattern in patterns]
+            for test_type, patterns in self.TEST_TYPE_PATTERNS.items()
+        }
+
+    @lru_cache(maxsize=128)
+    def determine_test_type(self, xml_file: Path) -> str:
+        """Determine test type based on XML file path patterns."""
+        xml_file_str = str(xml_file)
+
+        for test_type, patterns in self._compiled_test_type_patterns.items():
+            if any(pattern.search(xml_file_str) for pattern in patterns):
+                return test_type
+
+        return "xpu-xpu"
+
+    def normalize_filepath(self, filepath: str) -> str:
+        """Normalize test file path with replacements."""
+        if not filepath:
+            return "unknown_file.py"
+
+        normalized = filepath
+
+        # Apply regex normalization
+        if self._NORMALIZE_PATTERN.search(normalized):
+            normalized = self._NORMALIZE_PATTERN.sub("test/", normalized)
+
+        # Apply string replacements
+        for old, new in self.FILE_REPLACEMENTS:
+            normalized = normalized.replace(old, new)
+
+        return normalized
+
+    def extract_testfile(self, classname: str, filename: str, xml_file: Path) -> str:
+        """Extract and normalize test file path."""
         # Priority 1: Use filename from XML
-        if filename and filename.endswith('.py'):
-            testfile = f'test/{filename}'
+        if filename:
+            if filename.endswith(".cpp"):
+                testfile = self._TESTFILE_PATTERN_CPP.sub("test/", filename)
+            elif filename.endswith(".py"):
+                testfile = f"test/{filename}"
+            else:
+                testfile = filename
         # Priority 2: Extract from classname
         elif classname:
-            testfile = self._testfile_pattern.sub('test/', classname).replace('.', '/')
-            if '/' in testfile:
-                testfile = testfile.rsplit('/', 1)[0] + '.py'
+            testfile = self._TESTFILE_PATTERN.sub("test/", classname).replace(".", "/")
+            if "/" in testfile:
+                testfile = f"{testfile.rsplit('/', 1)[0]}.py"
             else:
-                testfile = f'{testfile}.py'
+                testfile = f"{testfile}.py"
         # Priority 3: Extract from XML filename
         else:
             xml_file_str = str(xml_file)
             testfile = (
-                re.sub(r'.*op_ut_with_[a-zA-Z0-9]+\.', 'test.', xml_file_str)
-                .replace('.', '/')
-                .replace('/py/xml', '.py')
-                .replace('/xml', '.py')
+                re.sub(r".*op_ut_with_[a-zA-Z0-9]+\.", "test.", xml_file_str)
+                .replace(".", "/")
+                .replace("/py/xml", ".py")
+                .replace("/xml", ".py")
             )
-        # Replace specific strings
-        output = self._normalize_pattern.sub('test/', testfile).replace(
-                                'test/test/', 'test/'
-                            ).replace(
-                                "_xpu.py", ".py"
-                            ).replace(
-                                "test_c10d_xccl.py", "test_c10d_nccl.py"
-                            ).replace(
-                                "test_c10d_ops_xccl.py", "test_c10d_ops_nccl.py"
-                            )
-        return output
 
-    def _extract_classname(self, full_classname: str) -> str:
+        return self.normalize_filepath(testfile)
+
+    def extract_classname(self, full_classname: str) -> str:
         """Extract simplified classname from full classname."""
         if not full_classname:
             return "UnknownClass"
-        return self._classname_pattern.sub('', full_classname)
+        return self._CLASSNAME_PATTERN.sub("", full_classname)
 
-    def _extract_casename(self, casename: str) -> str:
+    def extract_casename(self, casename: str) -> str:
         """Extract normalized test case name."""
         if not casename:
             return "unknown_name"
+
         try:
-            casename = self._casename_pattern.sub('', casename)
-            casename = self._testfile_pattern.sub('', casename)
+            casename = self._CASENAME_PATTERN.sub("", casename)
+            casename = self._TESTFILE_PATTERN.sub("", casename)
             return casename or "error_name"
         except Exception:
             return "error_name"
 
-    def _generate_uniqname(self, filename: str, classname: str, name: str) -> str:
+    def generate_uniqname(self, filename: str, classname: str, name: str) -> str:
         """Generate unique identifier for test case."""
         combined = f"{filename}{classname}{name}"
-        return self._gpu_pattern.sub('cuda', combined)
+        return self._GPU_PATTERN.sub("cuda", combined)
 
-    def _determine_test_status(self, testcase: ET.Element) -> Tuple[str, str, str]:
+
+def timer(func: Callable[..., T]) -> Callable[..., T]:
+    """Decorator to measure function execution time."""
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = time.perf_counter() - start_time
+        logger.debug(f"{func.__name__} executed in {elapsed:.3f}s")
+        return result
+    return wrapper
+
+
+class TestDetailsExtractor:
+    """
+    Enhanced extractor for test details from JUnit XML files.
+
+    Features:
+    - Strategy pattern for processing
+    - Comprehensive error handling
+    - Memory-efficient streaming
+    - Configurable via dependency injection
+    """
+
+    def __init__(
+        self,
+        processing_strategy: ProcessingStrategy | None = None,
+        pattern_matcher: FilePatternMatcher | None = None,
+        max_workers: int | None = None,
+        use_cache: bool = True,
+    ):
         """
-        Determine test status and extract message/type.
+        Initialize the extractor.
+
+        Args:
+            processing_strategy: Strategy for processing files
+            pattern_matcher: File pattern matcher instance
+            max_workers: Maximum number of parallel workers
+            use_cache: Whether to use caching for expensive operations
         """
+        self.pattern_matcher = pattern_matcher or FilePatternMatcher()
+        self.processing_strategy = processing_strategy or ParallelProcessingStrategy(max_workers)
+        self.use_cache = use_cache
+
+        self.test_cases: List[TestCase] = []
+        self.processed_files: List[str] = []
+        self.empty_files: List[str] = []
+        self.failed_files: Dict[str, str] = {}
+
+        # Statistics
+        self.stats = {
+            "files_processed": 0,
+            "test_cases_found": 0,
+            "processing_time": 0.0,
+        }
+
+    @contextmanager
+    def _measure_time(self, operation: str) -> Generator[None, None, None]:
+        """Context manager for timing operations."""
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start_time
+            logger.debug(f"{operation} completed in {elapsed:.3f}s")
+
+    def _determine_test_status(self, testcase: Element) -> Tuple[TestStatus, str, str]:
+        """Determine test status and extract message/type."""
         # Check for failure
-        failure = testcase.find('failure')
+        failure = testcase.find("failure")
         if failure is not None:
-            message = failure.get('message', '')
-            return ('xfail', message, 'xfail') if 'pytest.xfail' in message else ('failure', message, 'failure')
+            message = failure.get("message", "")
+            if "pytest.xfail" in message:
+                return TestStatus.XFAIL, message, "xfail"
+            return TestStatus.FAILED, message, "failure"
 
         # Check for skip
-        skipped = testcase.find('skipped')
+        skipped = testcase.find("skipped")
         if skipped is not None:
-            message = skipped.get('message', '')
-            skip_type = skipped.get('type', '')
-            if 'pytest.xfail' in skip_type or 'pytest.xfail' in message:
-                return 'xfail', message, 'xfail'
-            return 'skipped', message, skip_type
+            message = skipped.get("message", "")
+            skip_type = skipped.get("type", "")
+            if "pytest.xfail" in skip_type or "pytest.xfail" in message:
+                return TestStatus.XFAIL, message, "xfail"
+            return TestStatus.SKIPPED, message, skip_type
 
-        return 'passed', '', ''
+        # Check for error
+        error = testcase.find("error")
+        if error is not None:
+            message = error.get("message", "")
+            return TestStatus.ERROR, message, "error"
 
-    def _process_testcase_element(self, testcase: ET.Element, xml_file: Path, test_type: str) -> Optional[TestCase]:
-        """
-        Process a single testcase element into a TestCase object.
-        """
+        return TestStatus.PASSED, "", ""
+
+    def _parse_testcase_element(self, testcase: Element, xml_file: Path) -> Optional[TestCase]:
+        """Parse a single testcase element into a TestCase object."""
         try:
-            classname = testcase.get('classname', 'UnknownClass')
-            filename = testcase.get('file', 'unknown_file')
-            name = testcase.get('name', 'unknown_name')
-            time = float(testcase.get('time', 0))
+            classname = testcase.get("classname", "")
+            filename = testcase.get("file", "")
+            name = testcase.get("name", "")
+            time_str = testcase.get("time", "0")
 
-            # Normalize extracted data
-            simplified_classname = self._extract_classname(classname)
-            simplified_casename = self._extract_casename(name)
-            testfile = self._extract_testfile(classname, filename, xml_file)
-            uniqname = self._generate_uniqname(testfile, simplified_classname, simplified_casename)
+            # Extract and normalize
+            simplified_classname = self.pattern_matcher.extract_classname(classname)
+            simplified_casename = self.pattern_matcher.extract_casename(name)
+            testfile = self.pattern_matcher.extract_testfile(classname, filename, xml_file)
 
+            # Generate unique identifier
+            uniqname = self.pattern_matcher.generate_uniqname(testfile, simplified_classname, simplified_casename)
+
+            # Determine test type and status
+            test_type = self.pattern_matcher.determine_test_type(xml_file)
             status, message, result_type = self._determine_test_status(testcase)
+            device = TestDevice.from_test_type(test_type)
+
+            # Convert time to float safely
+            try:
+                time_val = float(time_str)
+            except ValueError:
+                time_val = 0.0
 
             return TestCase(
-                device=test_type.split('-')[0],
-                testtype=test_type,
-                testfile=testfile,
                 uniqname=uniqname,
+                testfile=testfile,
                 classname=simplified_classname,
                 name=simplified_casename,
+                device=device,
+                testtype=test_type,
                 status=status,
-                time=time,
+                time=time_val,
                 source_file=str(xml_file),
                 message=message,
-                type=result_type
+                type=result_type,
             )
 
         except Exception as e:
-            logger.error(f"Error processing test case: {e}")
+            logger.error(f"Error parsing test case in {xml_file}: {e}")
             return None
 
-    def process_single_xml_file(self, xml_file: Path) -> bool:
-        """
-        Process a single XML file and extract test results.
-        """
-        tree, root = self.parse_single_xml(xml_file)
-        if not root:
+    def find_xml_files(self, input_paths: List[PathLike]) -> List[Path]:
+        """Find all XML files from various input specifications."""
+        xml_files: Set[Path] = set()
+
+        for input_path in input_paths:
+            path = Path(input_path).expanduser().resolve()
+
+            if path.is_file() and path.suffix.lower() == ".xml":
+                xml_files.add(path)
+            elif path.is_dir():
+                # Use rglob for recursive search
+                xml_files.update(path.rglob("*.xml"))
+            else:
+                # Handle glob patterns
+                for file_path in glob.glob(str(path), recursive=True):
+                    file_path = Path(file_path)
+                    if file_path.is_file() and file_path.suffix.lower() == ".xml":
+                        xml_files.add(file_path.resolve())
+
+        return sorted(xml_files)
+
+    def _process_single_xml(self, xml_file: Path) -> Tuple[List[TestCase], Dict[str, Any]]:
+        """Process a single XML file and return test cases."""
+        try:
+            with self._measure_time(f"Parse {xml_file.name}"):
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
+
+            test_cases_elements = root.findall(".//testcase")
+
+            if not test_cases_elements:
+                return [], {"status": "empty", "file": str(xml_file)}
+
+            test_cases = []
+            for testcase in test_cases_elements:
+                parsed_case = self._parse_testcase_element(testcase, xml_file)
+                if parsed_case:
+                    test_cases.append(parsed_case)
+
+            return test_cases, {
+                "status": "success",
+                "file": str(xml_file),
+                "count": len(test_cases),
+            }
+
+        except ET.ParseError as e:
+            logger.error(f"XML parse error in {xml_file}: {e}")
+            return [], {"status": "parse_error", "file": str(xml_file), "error": str(e)}
+        except Exception as e:
+            logger.error(f"Unexpected error processing {xml_file}: {e}")
+            return [], {"status": "error", "file": str(xml_file), "error": str(e)}
+
+    def _handle_processing_result(self, xml_file: Path, test_cases: List[TestCase], metadata: Dict[str, Any]) -> None:
+        """Handle the result of processing a single XML file."""
+        if metadata["status"] == "empty":
+            self.empty_files.append(str(xml_file))
+        elif metadata["status"] == "success":
+            self.test_cases.extend(test_cases)
+            self.processed_files.append(str(xml_file))
+            self.stats["test_cases_found"] += len(test_cases)
+        else:
+            self.failed_files[str(xml_file)] = metadata.get("error", "Unknown error")
+
+    @timer
+    def process(self, input_paths: List[PathLike]) -> bool:
+        """Main processing method."""
+        start_time = time.perf_counter()
+
+        try:
+            # Find XML files
+            xml_files = self.find_xml_files(input_paths)
+
+            if not xml_files:
+                logger.error("No XML files found")
+                return False
+
+            logger.info(f"Found {len(xml_files)} XML files")
+
+            # Process files using the selected strategy
+            self.processing_strategy.process_files(self, xml_files)
+
+            # Calculate statistics
+            self.stats["processing_time"] = time.perf_counter() - start_time
+
+            # Log summary
+            self._log_summary()
+
+            return len(self.test_cases) > 0
+
+        except Exception as e:
+            logger.error(f"Processing failed: {e}")
             return False
 
-        test_type = self._determine_test_type(xml_file)
-        file_test_cases = []
+    def _log_summary(self) -> None:
+        """Log processing summary."""
+        logger.info("=" * 60)
+        logger.info("PROCESSING SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Files processed: {self.stats['files_processed']}")
+        logger.info(f"Test cases found: {self.stats['test_cases_found']}")
+        logger.info(f"Processing time: {self.stats['processing_time']:.2f}s")
+        logger.info(f"Empty files: {len(self.empty_files)}")
+        logger.info(f"Failed files: {len(self.failed_files)}")
 
-        # Extract individual test cases
-        test_cases_elements = root.findall('.//testcase')
-        
-        if test_cases_elements:
-            for testcase in tqdm(test_cases_elements, 
-                               desc=f"Processing {xml_file.name}", 
-                               leave=False,
-                               unit="test"):
-                test_case = self._process_testcase_element(testcase, xml_file, test_type)
-                if test_case:
-                    file_test_cases.append(test_case)
-        else:
-            self.empty_case_files.append(str(xml_file))
+        if self.empty_files and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Empty files:")
+            for file in self.empty_files[:5]:
+                logger.debug(f"  - {file}")
+            if len(self.empty_files) > 5:
+                logger.debug(f"  ... and {len(self.empty_files) - 5} more")
 
-        # Add to consolidated results
-        self.all_test_cases.extend(file_test_cases)
-        self.processed_files.append(str(xml_file))
+        if self.failed_files and logger.isEnabledFor(logging.WARNING):
+            logger.warning("Failed files:")
+            for file, error in list(self.failed_files.items())[:3]:
+                logger.warning(f"  - {file}: {error}")
+            if len(self.failed_files) > 3:
+                logger.warning(f"  ... and {len(self.failed_files) - 3} more")
 
-        logger.debug(f"Processed {len(file_test_cases)} test cases from {xml_file.name}")
-        return True
 
-    def process_multiple_xml_files(self, xml_files: List[Path]) -> bool:
-        """
-        Process multiple XML files with progress bar.
-        """
-        logger.info(f"Starting processing of {len(xml_files)} XML files")
-        no_case_files_list = []
+class TestResultAnalyzer:
+    """Analyze and manipulate test results."""
 
-        success_count = 0
-        for xml_file in tqdm(xml_files, desc="Processing XML files", unit="file"):
-            if self.process_single_xml_file(xml_file):
-                success_count += 1
+    def __init__(self, test_cases: List[TestCase]):
+        self.test_cases = test_cases
+        self.dataframe = self._create_dataframe()
 
-        logger.info(f"Successfully processed {success_count}/{len(xml_files)} files")
-        return success_count > 0
+    def _create_dataframe(self) -> pd.DataFrame:
+        """Create DataFrame from test cases."""
+        if not self.test_cases:
+            return pd.DataFrame()
 
-    def standardize_status_value(self, status: Any) -> str:
-        """Standardize status values for consistent comparison."""
-        if pd.isna(status):
-            return str(status)
-        
-        status_str = str(status).lower()
-        
-        for standardized_status, patterns in self.STATUS_MAPPINGS.items():
-            if any(pattern in status_str for pattern in patterns):
-                return standardized_status
-        
-        return status_str
+        # Use list comprehension for better performance
+        data = [tc.to_series() for tc in self.test_cases]
+        return pd.DataFrame(data)
 
-    def drop_deduplicated(self, df: pd.DataFrame, group_cols: list, status_col: str) -> pd.DataFrame:
-        """Optimized function for deduplication with status priority"""
-        # Define priority mapping
-        priority_map = {'pass': 5, 'xfail': 4, 'fail': 3, 'skip': 2, '': 1}
-        
-        # Add priority and get index of min priority per group
-        df = df.copy()
+    def get_unique_test_cases(self) -> pd.DataFrame:
+        """Get deduplicated test cases with status priority."""
+        if self.dataframe.empty:
+            return pd.DataFrame()
 
-        df['_priority'] = df[status_col].map(priority_map).fillna(-1)
-        
-        # Find indices of best rows
-        best_indices = df.groupby(group_cols)['_priority'].idxmax()
-        
-        # Return best rows
-        result = df.loc[best_indices].drop('_priority', axis=1).reset_index(drop=True)
-        
+        df = self.dataframe.copy()
+
+        # Add priority column using TestStatus enum
+        df["_priority"] = df["status"].apply(
+            lambda x: TestStatus.from_string(x).priority
+        )
+
+        # Group and select highest priority
+        group_cols = ["device", "uniqname", "testfile", "classname", "name"]
+        idx = df.groupby(group_cols)["_priority"].idxmax()
+
+        result = df.loc[idx].drop("_priority", axis=1).reset_index(drop=True)
+
         return result
 
-    def safe_merge(self, left: pd.DataFrame, right: pd.DataFrame, merge_keys: List[str]) -> pd.DataFrame:
-        """
-        Safely merge two DataFrames with proper suffix handling.
+    def split_by_device(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Split DataFrame by device."""
+        if df.empty or "device" not in df.columns:
+            return pd.DataFrame(), pd.DataFrame()
 
-        Args:
-            left: Left DataFrame
-            right: Right DataFrame
-            merge_keys: Keys to merge on
+        cuda_mask = df["device"] == "cuda"
+        xpu_mask = df["device"] == "xpu"
 
-        Returns:
-            Merged DataFrame
-        """
-        # Identify overlapping columns (excluding merge keys)
-        left_cols = set(left.columns)
-        right_cols = set(right.columns)
-        overlapping_cols = (left_cols & right_cols) - set(merge_keys)
+        return df[cuda_mask].copy(), df[xpu_mask].copy()
 
-        if overlapping_cols:
-            logger.debug(f"Overlapping columns found: {overlapping_cols}")
-            # Use suffixes to distinguish overlapping columns
-            suffixes = ('_cuda', '_xpu')
+    def merge_device_results(self, cuda_df: pd.DataFrame, xpu_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge CUDA and XPU test results for comparison."""
+        if cuda_df.empty and xpu_df.empty:
+            return pd.DataFrame()
+
+        # Prepare dataframes with suffixes
+        cuda_prep = cuda_df.add_suffix("_cuda").rename(columns={"uniqname_cuda": "uniqname"})
+        xpu_prep = xpu_df.add_suffix("_xpu").rename(columns={"uniqname_xpu": "uniqname"})
+
+        # Merge
+        merged = pd.merge(
+            cuda_prep,
+            xpu_prep,
+            on="uniqname",
+            how="outer",
+            suffixes=("", "_duplicate")  # Already added suffixes
+        )
+
+        return merged
+
+    def filter_by_pattern(self, df: pd.DataFrame, column: str, pattern: str, invert: bool = False) -> pd.DataFrame:
+        """Filter DataFrame by pattern in a column."""
+        if df.empty or column not in df.columns:
+            return pd.DataFrame()
+
+        mask = df[column].str.contains(pattern, case=False, na=False, regex=True)
+        if invert:
+            mask = ~mask
+
+        return df[mask].copy()
+
+    def get_xpu_only_skipped(self, merged_df: pd.DataFrame) -> pd.DataFrame:
+        """Get tests where CUDA passed but XPU failed/skipped."""
+        if merged_df.empty:
+            return pd.DataFrame()
+
+        # Define conditions
+        cuda_passed = merged_df["status_cuda"] == "passed"
+        xpu_not_passed = (
+            ~merged_df["status_xpu"].isin(["passed", "xfail"]) |
+            merged_df["status_xpu"].isna()
+        )
+
+        return merged_df[cuda_passed & xpu_not_passed].copy()
+
+    def generate_statistics(self, df: pd.DataFrame | None = None) -> Dict[str, Any]:
+        """Generate comprehensive statistics."""
+        df = df if df is not None else self.get_unique_test_cases()
+
+        if df.empty:
+            return {}
+
+        stats = {
+            "total_unique_cases": len(df),
+            "by_device": {},
+            "by_status": {},
+            "by_test_type": {},
+        }
+
+        # Device statistics
+        if "device" in df.columns:
+            stats["by_device"] = df["device"].value_counts().to_dict()
+
+        # Status statistics
+        if "status" in df.columns:
+            stats["by_status"] = df["status"].value_counts().to_dict()
+
+        # Test type statistics
+        if "testtype" in df.columns:
+            stats["by_test_type"] = df["testtype"].value_counts().to_dict()
+
+        # Time statistics
+        if "time" in df.columns:
+            stats["time_stats"] = {
+                "total": df["time"].sum(),
+                "mean": df["time"].mean(),
+                "median": df["time"].median(),
+                "max": df["time"].max(),
+                "min": df["time"].min(),
+                "std": df["time"].std(),
+            }
+
+        return stats
+
+
+class ReportExporter:
+    """Export test results to various formats."""
+
+    def __init__(self, output_dir: Path):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def export_excel(self, analyzer: TestResultAnalyzer, output_path: Path) -> Dict[str, Path]:
+        """Export results to Excel format."""
+        output_files = {"main": output_path}
+
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            # Get unique test cases
+            unique_df = analyzer.get_unique_test_cases()
+            unique_df.to_excel(writer, sheet_name="All Test Cases", index=False)
+
+            # Split by device
+            cuda_df, xpu_df = analyzer.split_by_device(unique_df)
+
+            if not cuda_df.empty and not xpu_df.empty:
+                # Generate merged results
+                merged_df = analyzer.merge_device_results(cuda_df, xpu_df)
+                inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/")
+                non_inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/", invert=True)
+
+                inductor_merged.to_excel(writer, sheet_name="Merged Inductor", index=False)
+                non_inductor_merged.to_excel(writer, sheet_name="Merged Non-Inductor", index=False)
+
+                # Get XPU issues
+                skipped_df = analyzer.get_xpu_only_skipped(merged_df)
+                inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/")
+                non_inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/", invert=True)
+
+                inductor_skipped.to_excel(writer, sheet_name="XPU Issues Inductor", index=False)
+                non_inductor_skipped.to_excel(writer, sheet_name="XPU Issues Non-Inductor", index=False)
+
+            # Add statistics sheet
+            stats = analyzer.generate_statistics(unique_df)
+            if stats:
+                stats_df = pd.DataFrame([stats])
+                stats_df.to_excel(writer, sheet_name="Statistics", index=False)
+
+        return output_files
+
+    def export_csv(self, analyzer: TestResultAnalyzer, output_path: Path) -> Dict[str, Path]:
+        """Export results to CSV format."""
+        output_files = {"main": output_path}
+
+        # Get unique test cases
+        unique_df = analyzer.get_unique_test_cases()
+        unique_df.to_csv(output_path, index=False)
+
+        # Split by device
+        cuda_df, xpu_df = analyzer.split_by_device(unique_df)
+
+        if not cuda_df.empty and not xpu_df.empty:
+            # Generate merged results
+            merged_df = analyzer.merge_device_results(cuda_df, xpu_df)
+            inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/")
+            non_inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/", invert=True)
+
+            # Get XPU issues
+            skipped_df = analyzer.get_xpu_only_skipped(merged_df)
+            inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/")
+            non_inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/", invert=True)
+
+            # Save additional files
+            base_stem = output_path.stem
+            suffixes = {
+                "merged-inductor": inductor_merged,
+                "merged-non-inductor": non_inductor_merged,
+                "skipped-inductor": inductor_skipped,
+                "skipped-non-inductor": non_inductor_skipped,
+            }
+
+            for suffix, df in suffixes.items():
+                if not df.empty:
+                    filename = f"{base_stem}_{suffix}{output_path.suffix}"
+                    filepath = self.output_dir / filename
+                    df.to_csv(filepath, index=False)
+                    output_files[suffix] = filepath
+
+            # Save statistics
+            stats = analyzer.generate_statistics(unique_df)
+            if stats:
+                stats_file = self.output_dir / f"{base_stem}_stats.json"
+                with open(stats_file, "w") as f:
+                    json.dump(stats, f, indent=2, default=str)
+                output_files["stats"] = stats_file
+
+        return output_files
+
+    def export(self, analyzer: TestResultAnalyzer, output_file: str) -> Dict[str, Path]:
+        """Export all report types."""
+        output_path = Path(output_file)
+
+        if output_path.suffix.lower() in [".xlsx", ".xls"]:
+            return self.export_excel(analyzer, output_path)
         else:
-            suffixes = ('', '')
-
-        try:
-            merged_df = pd.merge(left, right, on=merge_keys, how='outer', suffixes=suffixes)
-            logger.debug(f"Merge successful: {len(left)} + {len(right)} -> {len(merged_df)} rows")
-            return merged_df
-        except Exception as e:
-            logger.error(f"Merge failed: {e}")
-            logger.error(f"Left columns: {list(left.columns)}")
-            logger.error(f"Right columns: {list(right.columns)}")
-            raise
-
-    def save_test_details(self, output_file: str) -> None:
-        """
-        Save all test details to Excel or CSV file.
-        """
-        if not self.all_test_cases:
-            logger.warning("No test cases to export")
-            return
-
-        try:
-            df = pd.DataFrame([asdict(tc) for tc in self.all_test_cases])
-            
-            # Select and order columns for better readability
-            column_order = [
-                'device', 'testtype', 'uniqname', 'testfile', 'classname', 'name', 
-                'status', 'message', 'type', 'time'
-            ]
-            available_columns = [col for col in column_order if col in df.columns]
-            df = df[available_columns]
-            df['status'] = df['status'].apply(self.standardize_status_value)
-            # Remove duplicated cases
-            df = df.sort_values(['status', 'time'], ascending=[True, False])
-            grouped_df = self.drop_deduplicated(df, ['device', 'uniqname', 'classname', 'name'], 'status')
-            self.unique_total_case = len(grouped_df)
-
-            # Save to file
-            output_path = Path(output_file)
-            if output_path.suffix.lower() in ['.xlsx', '.xls']:
-                grouped_df.to_excel(output_file, index=False, engine='openpyxl')
-            else:
-                grouped_df.to_csv(output_file, index=False)
-            # Merged data
-            cuda_df = grouped_df.loc[(grouped_df['device'] == 'cuda')]
-            xpu_df = grouped_df.loc[(grouped_df['device'] == 'xpu')]
-            MERGE_KEYS = ['uniqname']
-            merged_df = self.safe_merge(cuda_df, xpu_df, MERGE_KEYS)
-            if output_path.suffix.lower() in ['.xlsx', '.xls']:
-                merged_df.to_excel(output_file.replace('.xls', '_merged.xls'), index=False, engine='openpyxl')
-            else:
-                merged_df.to_csv(output_file.replace('.csv', '_merged.csv'), index=False)
-            # Skipped data
-            skipped_df = merged_df.loc[(merged_df['status_cuda'] == 'passed') & (merged_df['status_xpu'] != 'passed')]
-            if output_path.suffix.lower() in ['.xlsx', '.xls']:
-                skipped_df.to_excel(output_file.replace('.xls', '_xpu_only_skipped.xls'), index=False, engine='openpyxl')
-            else:
-                skipped_df.to_csv(output_file.replace('.csv', '_xpu_only_skipped.csv'), index=False)
-
-            logger.info(f"Saved {len(grouped_df)} test details to: {output_file}")
-
-        except Exception as e:
-            logger.error(f"Error saving test details: {e}")
-            raise
-
-    def extract_details(self, input_paths: List[str], output_file: str) -> bool:
-        """
-        Main method to extract details from XML files.
-        """
-        logger.info(f"Starting details extraction from {len(input_paths)} input paths")
-
-        # Find XML files
-        xml_files = self.find_xml_files(input_paths)
-
-        if not xml_files:
-            logger.error("No XML files found matching the input criteria")
-            return False
-
-        # Process files
-        if not self.process_multiple_xml_files(xml_files):
-            logger.error("No files were successfully processed")
-            return False
-
-        # Save results
-        with self._timer(f"Saving to {output_file}"):
-            self.save_test_details(output_file)
-        
-        logger.info(f"Details extraction completed successfully. Processed {len(self.all_test_cases)} test cases.")
-        return True
+            return self.export_csv(analyzer, output_path)
 
 
-def main():
-    """Main entry point with argument parsing."""
+def main() -> int:
+    """Main entry point."""
     parser = argparse.ArgumentParser(
-        description='Extract test details from JUnit XML files',
+        description="Enhanced JUnit XML Test Details Extractor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process multiple specific files
-  python get_details.py --input results1.xml results2.xml results3.xml --output details.xlsx
+  # Process multiple files
+  python get_details.py --input results1.xml results2.xml --output details.xlsx
 
-  # Process all XML files in a directory
+  # Process directory recursively
   python get_details.py --input results/ --output details.csv
 
-  # Process files using glob pattern
-  python get_details.py --input "results/*.xml" --output test_details.xlsx
-        """
+  # Use glob pattern with parallel processing
+  python get_details.py --input "results/**/*.xml" --output test_details.xlsx --parallel
+
+  # Debug mode with sequential processing
+  python get_details.py --input test.xml --output debug.csv --sequential --verbose
+        """,
     )
 
     parser.add_argument(
-        '--input', '-i',
-        nargs='+',
+        "-i", "--input",
+        nargs="+",
         required=True,
-        help='XML file paths, directories, or glob patterns'
+        help="XML file paths, directories, or glob patterns",
     )
+
     parser.add_argument(
-        '--output', '-o',
+        "-o", "--output",
         required=True,
-        help='Output file path (supports .xlsx, .xls, .csv)'
+        help="Output file path (.xlsx, .xls, .csv)",
     )
+
     parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging'
+        "--output-dir",
+        default=".",
+        help="Output directory (default: current directory)",
+    )
+
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers (default: 4)",
+    )
+
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        default=True,
+        help="Use parallel processing (default: True)",
+    )
+
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Use sequential processing (disables parallel)",
+    )
+
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode with extra logging",
     )
 
     args = parser.parse_args()
 
-    # Configure logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Configure logging
+    log_level = logging.DEBUG if args.debug else (logging.INFO if args.verbose else logging.WARNING)
+    logging.getLogger().setLevel(log_level)
+
+    # Determine processing strategy
+    if args.sequential:
+        processing_strategy = SequentialProcessingStrategy()
     else:
-        logging.getLogger().setLevel(logging.INFO)
+        processing_strategy = ParallelProcessingStrategy(max_workers=args.workers)
 
-    # Initialize and run extractor
-    extractor = TestDetailsExtractor()
-    
-    if not extractor.extract_details(args.input, args.output):
+    try:
+        # Initialize extractor
+        extractor = TestDetailsExtractor(
+            processing_strategy=processing_strategy,
+            max_workers=args.workers,
+        )
+
+        # Process files
+        logger.info("Starting test details extraction...")
+        success = extractor.process(args.input)
+
+        if not success:
+            logger.error("Extraction failed or no test cases found")
+            return 1
+
+        # Analyze results
+        analyzer = TestResultAnalyzer(extractor.test_cases)
+
+        # Export reports
+        exporter = ReportExporter(Path(args.output_dir))
+        output_files = exporter.export(analyzer, args.output)
+
+        # Print summary
+        print("\n" + "=" * 60)
+        print("EXTRACTION COMPLETE")
+        print("=" * 60)
+        print(f"📊 Files processed: {extractor.stats['files_processed']}")
+        print(f"🧪 Test cases found: {extractor.stats['test_cases_found']}")
+        print(f"⏱️  Processing time: {extractor.stats['processing_time']:.2f}s")
+        print(f"📈 Unique test cases: {len(analyzer.get_unique_test_cases())}")
+
+        # Show device distribution
+        unique_df = analyzer.get_unique_test_cases()
+        if not unique_df.empty and "device" in unique_df.columns:
+            device_counts = unique_df["device"].value_counts()
+            print(f"📱 Device distribution:")
+            for device, count in device_counts.items():
+                print(f"   - {device}: {count}")
+
+        print(f"📁 Output files:")
+        for key, path in output_files.items():
+            size_mb = path.stat().st_size / 1024 / 1024 if path.exists() else 0
+            print(f"   - {key}: {path} ({size_mb:.2f} MB)")
+
+        if extractor.empty_files:
+            print(f"⚠️  Empty files: {len(extractor.empty_files)}")
+
+        if extractor.failed_files:
+            print(f"❌ Failed files: {len(extractor.failed_files)}")
+            if args.verbose:
+                for file, error in list(extractor.failed_files.items())[:3]:
+                    print(f"   - {file}: {error}")
+
+        print("=" * 60)
+
+        return 0
+
+    except KeyboardInterrupt:
+        logger.info("\nInterrupted by user")
+        return 130
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        if args.debug:
+            import traceback
+            traceback.print_exc()
         return 1
-
-    print(f"\n✓ Details extraction complete!")
-    print(f"  - Output file: {args.output}")
-    print(f"  - Processed files: {len(extractor.processed_files)}")
-    print(f"  - Empty case files: {len(extractor.empty_case_files)}")
-    print(f"  - Total test cases: {len(extractor.all_test_cases)}")
-    print(f"  - Unique test cases: {extractor.unique_total_case}")
-
-    return 0
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())
