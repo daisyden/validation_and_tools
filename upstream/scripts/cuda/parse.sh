@@ -1,13 +1,9 @@
-set -x
+set -e
 root=$(pwd)
 backend=$1
 data=$2
 
-
-if [ -d "xml" ];then
-	rm -rf xml
-fi
-
+rm -rf xml
 rm -f *.log
 rm -f *.csv
 

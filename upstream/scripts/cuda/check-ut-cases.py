@@ -281,7 +281,7 @@ def process_xml_file(xml_files):
                 def replace_underscores(match):
                     return match.group(1) + match.group(2).replace('_', '/') + match.group(3)
                 output = re.sub(pattern, replace_underscores, text)
-                return output.replace('test_distributed', 'distributed').replace('_test_', '/test_').replace('//', '/_')
+                return output.replace('test_distributed', 'distributed').replace('_test_', '/test_').replace('//', '/_') + '.py'
 
             def map_xml_to_pytest_path(xml_filename):
                 # Remove .xml extension
@@ -310,7 +310,6 @@ def process_xml_file(xml_files):
 
                 # Remove .xml extension
                 name_without_ext = xml_filename.replace('.xml', '')
-                name_without_ext = name_without_ext.replace('_xpu.py', '.py')
 
                 if re.search(name_without_ext, r"op_ut_with_[a-z]+.test_distributed_"):
                     name_without_prefix = re.sub(r'.*op_ut_with_[a-z]+.test_distributed_', 'distributed_', name_without_ext)
@@ -355,11 +354,16 @@ def process_xml_file(xml_files):
                 # Example
                 ut = map_xml_to_pytest_path(xml_file)
             else:
-                if 'op_ut_with_' in xml_file:
+                if 'op_ut_with_only.xml' in xml_file:
+                    continue
+                elif 'op_ut_with_' in xml_file:
                     ut = map_xml_to_pytest_path2(xml_file)
                 else:
                     continue
             # print(f"{xml_file}, {ut}")
+            ut = ut.replace('test/test/', 'test/')
+            ut = ut.replace('.py.py', '.py')
+            ut = ut.replace('_xpu.py', '.py')
 
             category = determine_category(ut)
 
@@ -378,10 +382,11 @@ def process_xml_file(xml_files):
             def write_details_log(current_file):
                 for _, case in file_case_status.items():                        
                     with open("details.csv", "a", encoding='utf-8') as log_file:
-                        _case_name = re.sub(r'(?:xpu|cuda|cpu)', 'gpu', case.name, flags=re.IGNORECASE)
-                        _class_name = re.sub(r'(?:xpu|cuda|cpu)', 'gpu', case.classname, flags=re.IGNORECASE)
+                        _case_name = re.sub(r'(?:xpu|cuda)', 'cuda', case.name, flags=re.IGNORECASE)
+                        _class_name = re.sub(r'(?:xpu|cuda)', 'cuda', case.classname, flags=re.IGNORECASE)
                         if "third_party" in _class_name or "distributed" in _class_name:
                             _class_name = _class_name.split('.')[-1]
+                            case.classname = case.classname.split('.')[-1]
 
                         if case.result and  isinstance(case.result[0], Skipped):
                             _message = case.result[0].message

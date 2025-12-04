@@ -323,12 +323,10 @@ class TestResultMerger:
         has_failed = (result_data == 'failed').any(axis=1)
         has_xfail = (result_data.isin(['xfail', 'xfailed'])).any(axis=1)
         all_skipped = (result_data == 'skipped').all(axis=1)
-        all_empty = (result_data == '').all(axis=1)
 
         # Apply conditions in priority order
         result = pd.Series('', index=df.index)
         result[all_skipped] = 'skipped'
-        result[all_empty] = ''
         result[has_xfail] = 'xfail'
         result[has_failed] = 'failed'
         result[has_passed] = 'passed'
@@ -479,7 +477,8 @@ class TestResultMerger:
         # Calculate XPU result using vectorized approach for better performance
         if len(merged_df) > 1000:
             logger.info("Using vectorized XPU result calculation for large dataset")
-            merged_df['Result-merge-xpu'] = self.calculate_xpu_result_vectorized(merged_df)
+            # merged_df['Result-merge-xpu'] = self.calculate_xpu_result_vectorized(merged_df)
+            merged_df['Result-merge-xpu'] = merged_df.apply(self.calculate_xpu_result, axis=1)
         else:
             logger.info("Using row-wise XPU result calculation")
             merged_df['Result-merge-xpu'] = merged_df.apply(self.calculate_xpu_result, axis=1)

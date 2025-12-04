@@ -1,4 +1,4 @@
-set -x
+set -e
 root=$(pwd)
 backend=$1
 
