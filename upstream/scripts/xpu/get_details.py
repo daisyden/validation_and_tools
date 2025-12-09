@@ -345,6 +345,23 @@ def timer(func: Callable[..., T]) -> Callable[..., T]:
         return result
     return wrapper
 
+def load_last_details(input_file: str, sheet_name: list) -> pd.DataFrame:
+    """
+    Load test details from Excel or CSV file.
+    """
+    try:
+        input_path = Path(input_file)
+        print(f"Loading data from {input_file}")
+        if input_path.suffix.lower() in ['.xlsx', '.xls']:
+            df = pd.read_excel(input_file, sheet_name=sheet_name, engine='openpyxl')
+        else:
+            df = pd.read_csv(input_file)
+        print(f"Loaded {len(df)} test cases from {input_file}")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error loading details file {input_file}: {e}")
+        raise
 
 class TestDetailsExtractor:
     """
@@ -593,9 +610,58 @@ class TestDetailsExtractor:
 class TestResultAnalyzer:
     """Analyze and manipulate test results."""
 
-    def __init__(self, test_cases: List[TestCase]):
+    def __init__(self, test_cases: List[TestCase], last_df: pd.DataFrame, reson_df: pd.DataFrame):
         self.test_cases = test_cases
         self.dataframe = self._create_dataframe()
+        self.dataframe = self.merge_last_results(last_df)
+        self.dataframe = self.merge_last_resons(reson_df)
+
+    def merge_last_results(self, last_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge CUDA and XPU test results for comparison."""
+        if last_df.empty:
+            return self.dataframe
+        
+        last_df_clean = last_df[["uniqname", "testfile", "classname", "name", "device", "testtype", "status", "time"]].copy()
+        last_df_clean = last_df_clean.rename(columns={
+            "testtype": "testtype_last",
+            "status": "status_last",
+            "time": "time_last"
+        })
+        
+        # Merge with suffixes to distinguish current vs last results
+        output = pd.merge(
+            self.dataframe,
+            last_df_clean,
+            on=["uniqname", "testfile", "classname", "name", "device"],
+            how="left",
+            suffixes=("", "_last")  # Columns from last_df will get "_last" suffix
+        )
+        
+        return output
+    
+    def merge_last_resons(self, reson_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge CUDA and XPU test results for comparison."""
+        if reson_df.empty:
+            return self.dataframe
+        
+        # Prepare reson_df
+        reson_df_clean = reson_df[['Testfile', 'Class', 'Testcase', 'Reason', 'DetailReason']].copy()
+        reson_df_clean = reson_df_clean.rename(columns={
+            "Testfile": "testfile",
+            "Class": "classname",
+            "Testcase": "name",
+        })
+        reson_df_clean['device'] = 'cuda'
+        # Merge
+        output = pd.merge(
+            self.dataframe,
+            reson_df_clean,
+            on=['device', 'testfile', 'classname', 'name'],
+            how='left',
+            suffixes=("", "_reason")  # Already added suffixes
+        )
+        
+        return output
 
     def _create_dataframe(self) -> pd.DataFrame:
         """Create DataFrame from test cases."""
@@ -606,12 +672,12 @@ class TestResultAnalyzer:
         data = [tc.to_series() for tc in self.test_cases]
         return pd.DataFrame(data)
 
-    def get_unique_test_cases(self) -> pd.DataFrame:
+    def get_unique_test_cases(self, df: pd.DataFrame = None) -> pd.DataFrame:
         """Get deduplicated test cases with status priority."""
-        if self.dataframe.empty:
+        if df is None:
+            df = self.dataframe.copy()
+        if df.empty:
             return pd.DataFrame()
-
-        df = self.dataframe.copy()
 
         # Add priority column using TestStatus enum
         df["_priority"] = df["status"].apply(
@@ -642,17 +708,17 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Prepare dataframes with suffixes
-        cuda_prep = cuda_df.add_suffix("_cuda").rename(columns={"uniqname_cuda": "uniqname"})
-        xpu_prep = xpu_df.add_suffix("_xpu").rename(columns={"uniqname_xpu": "uniqname"})
+        # cuda_prep = cuda_df.add_suffix("_cuda").rename(columns={"uniqname_cuda": "uniqname"})
+        # xpu_prep = xpu_df.add_suffix("_xpu").rename(columns={"uniqname_xpu": "uniqname"})
 
         # Merge
         merged = pd.merge(
-            cuda_prep,
-            xpu_prep,
+            cuda_df,
+            xpu_df,
             on="uniqname",
-            how="outer",
-            suffixes=("", "_duplicate")  # Already added suffixes
-        )
+            how="left",
+            suffixes=("", "_xpu")  # Already added suffixes
+        ).drop(columns=['Reason_xpu', 'DetailReason_xpu'])
 
         return merged
 
@@ -673,7 +739,7 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Define conditions
-        cuda_passed = merged_df["status_cuda"] == "passed"
+        cuda_passed = merged_df["status"] == "passed"
         xpu_not_passed = (
             ~merged_df["status_xpu"].isin(["passed", "xfail"]) |
             merged_df["status_xpu"].isna()
@@ -727,7 +793,7 @@ class ReportExporter:
     def __init__(self, output_dir: Path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
+        
     def export_excel(self, analyzer: TestResultAnalyzer, output_path: Path) -> Dict[str, Path]:
         """Export results to Excel format."""
         output_files = {"main": output_path}
@@ -743,19 +809,19 @@ class ReportExporter:
             if not cuda_df.empty and not xpu_df.empty:
                 # Generate merged results
                 merged_df = analyzer.merge_device_results(cuda_df, xpu_df)
-                inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/")
-                non_inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/", invert=True)
+                inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile", "/inductor/")
+                non_inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile", "/inductor/", invert=True)
 
                 inductor_merged.to_excel(writer, sheet_name="Merged Inductor", index=False)
                 non_inductor_merged.to_excel(writer, sheet_name="Merged Non-Inductor", index=False)
 
                 # Get XPU issues
                 skipped_df = analyzer.get_xpu_only_skipped(merged_df)
-                inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/")
-                non_inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/", invert=True)
+                inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile", "/inductor/")
+                non_inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile", "/inductor/", invert=True)
 
-                inductor_skipped.to_excel(writer, sheet_name="XPU Issues Inductor", index=False)
-                non_inductor_skipped.to_excel(writer, sheet_name="XPU Issues Non-Inductor", index=False)
+                inductor_skipped.to_excel(writer, sheet_name="XPU skipped only Inductor", index=False)
+                non_inductor_skipped.to_excel(writer, sheet_name="XPU skipped only Non-Inductor", index=False)
 
             # Add statistics sheet
             stats = analyzer.generate_statistics(unique_df)
@@ -779,13 +845,13 @@ class ReportExporter:
         if not cuda_df.empty and not xpu_df.empty:
             # Generate merged results
             merged_df = analyzer.merge_device_results(cuda_df, xpu_df)
-            inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/")
-            non_inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile_cuda", "/inductor/", invert=True)
+            inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile", "/inductor/")
+            non_inductor_merged = analyzer.filter_by_pattern(merged_df, "testfile", "/inductor/", invert=True)
 
             # Get XPU issues
             skipped_df = analyzer.get_xpu_only_skipped(merged_df)
-            inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/")
-            non_inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile_cuda", "/inductor/", invert=True)
+            inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile", "/inductor/")
+            non_inductor_skipped = analyzer.filter_by_pattern(skipped_df, "testfile", "/inductor/", invert=True)
 
             # Save additional files
             base_stem = output_path.stem
@@ -895,6 +961,24 @@ Examples:
         help="Enable debug mode with extra logging",
     )
 
+    parser.add_argument(
+        "--last",
+        default=None,
+        help="Last input file path (.xlsx, .xls, .csv)",
+    )
+    
+    parser.add_argument(
+        "--inductor",
+        default=None,
+        help="inductor input file path (.xlsx, .xls, .csv)",
+    )
+    
+    parser.add_argument(
+        "--non-inductor",
+        default=None,
+        help="non-inductor input file path (.xlsx, .xls, .csv)",
+    )
+
     args = parser.parse_args()
 
     # Configure logging
@@ -908,6 +992,30 @@ Examples:
         processing_strategy = ParallelProcessingStrategy(max_workers=args.workers)
 
     try:
+        # Load last details
+        try:
+            last_df = reson_df = pd.DataFrame()
+            dataframes_to_concat = []
+            
+            if args.last is not None:
+                last_df = load_last_details(args.last, ['All Test Cases'])
+                last_df = last_df['All Test Cases']
+            
+            if args.inductor is not None:
+                last_inductor_dfs = load_last_details(args.inductor, ['Cuda pass xpu skip', 'to_be_enabled'])
+                dataframes_to_concat.extend(last_inductor_dfs.values())
+            
+            if args.non_inductor is not None:
+                last_non_inductor_dfs = load_last_details(args.non_inductor, ['Non-Inductor XPU Skip'])
+                dataframes_to_concat.append(last_non_inductor_dfs['Non-Inductor XPU Skip'])
+            
+            # Combine all DataFrames if we have any
+            if dataframes_to_concat:
+                reson_df = pd.concat(dataframes_to_concat, ignore_index=True)
+                
+        except Exception as e:
+            logger.error(f"Failed to load details file: {e}")
+
         # Initialize extractor
         extractor = TestDetailsExtractor(
             processing_strategy=processing_strategy,
@@ -923,7 +1031,7 @@ Examples:
             return 1
 
         # Analyze results
-        analyzer = TestResultAnalyzer(extractor.test_cases)
+        analyzer = TestResultAnalyzer(extractor.test_cases, last_df=last_df, reson_df=reson_df)
 
         # Export reports
         exporter = ReportExporter(Path(args.output_dir))
