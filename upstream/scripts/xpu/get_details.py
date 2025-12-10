@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced JUnit XML Test Details Extractor
-
-Extracts test details from JUnit XML files and saves to Excel/CSV with improved
-efficiency, error handling, and extensibility.
-
-Features:
-- Streaming XML parsing for memory efficiency
-- Parallel processing with configurable workers
-- Comprehensive error handling and validation
-- Type hints and documentation throughout
-- Performance profiling and benchmarking
-- Configuration management via Pydantic
+JUnit XML Test Details Extractor
 
 Usage:
     python get_details.py --input "results/*.xml" --output details.xlsx
@@ -38,7 +27,7 @@ from datetime import datetime
 from enum import Enum
 from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypeVar
+from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypeVar, Union
 from xml.etree import ElementTree as ET
 from xml.parsers.expat import ExpatError
 
@@ -57,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Type aliases
 T = TypeVar("T")
 Element = ET.Element
-PathLike = str | Path
+PathLike = Union[str, Path]
 
 
 # ============================================================================
@@ -84,7 +73,7 @@ class InvalidXMLStructureError(XMLProcessingError):
 class ExtractionConfig(BaseModel):
     """Configuration for test extraction."""
 
-    max_workers: int = Field(default=4, ge=1, le=64, description="Maximum parallel workers")
+    max_workers: int = Field(default=8, ge=1, le=64, description="Maximum parallel workers")
     chunk_size: int = Field(default=1000, ge=100, le=10000, description="Chunk size for processing")
     use_cache: bool = Field(default=True, description="Enable caching for expensive operations")
     cache_maxsize: int = Field(default=2048, ge=128, le=8192, description="Maximum cache size")
@@ -183,7 +172,7 @@ class TestDevice(Enum):
 # DATA CLASSES
 # ============================================================================
 
-@dataclasses.dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True)
 class TestCase:
     """Immutable data class representing a single test case."""
 
@@ -350,7 +339,7 @@ class ProcessingStrategy(ABC):
 class ParallelProcessingStrategy(ProcessingStrategy):
     """Parallel processing strategy using ThreadPoolExecutor."""
 
-    def __init__(self, max_workers: int | None = None):
+    def __init__(self, max_workers: Optional[int] = None):
         self.max_workers = max_workers or min(32, (os.cpu_count() or 4) + 4)
 
     @timer_with_stats
@@ -448,7 +437,7 @@ class FilePatternMatcher:
             if any(pattern.search(xml_file_str) for pattern in patterns):
                 return test_type
 
-        return "xpu-undefied"
+        return "xpu-undefined"
 
     @lru_cache(maxsize=2048)
     def normalize_filepath(self, filepath: str, testtype: str) -> str:
@@ -545,9 +534,9 @@ class TestDetailsExtractor:
 
     def __init__(
         self,
-        processing_strategy: ProcessingStrategy | None = None,
-        pattern_matcher: FilePatternMatcher | None = None,
-        config: ExtractionConfig | None = None,
+        processing_strategy: Optional[ProcessingStrategy] = None,
+        pattern_matcher: Optional[FilePatternMatcher] = None,
+        config: Optional[ExtractionConfig] = None,
     ):
         """
         Initialize the extractor.
@@ -864,8 +853,7 @@ class TestResultAnalyzer:
 
         # Select and rename columns efficiently
         last_df_clean = last_df[[
-            "uniqname", "testfile", "classname", "name",
-            "device", "status", "time"
+            "uniqname", "testfile", "classname", "name", "device", "status", "time"
         ]].copy()
 
         # Convert status to strings if they're enums
@@ -913,7 +901,7 @@ class TestResultAnalyzer:
             copy=False
         )
 
-    def get_unique_test_cases(self, df: pd.DataFrame = None) -> pd.DataFrame:
+    def get_unique_test_cases(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """Get deduplicated test cases with status priority."""
         if df is None:
             df = self.dataframe.copy()
@@ -943,28 +931,34 @@ class TestResultAnalyzer:
 
         return df[cuda_mask].copy(), df[xpu_mask].copy()
 
-    def merge_device_results(self, cuda_df: pd.DataFrame, xpu_df: pd.DataFrame) -> pd.DataFrame:
+    def merge_device_results(self, cuda_df: pd.DataFrame, xpu_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Merge CUDA and XPU test results for comparison."""
         if cuda_df.empty and xpu_df.empty:
             return pd.DataFrame()
 
+        # Add suffix
+        cuda_df = cuda_df.add_suffix('_cuda').rename(columns={
+            "uniqname_cuda": "uniqname",
+            "Reason_cuda": "Reason",
+            "DetailReason_cuda": "DetailReason",
+        })
+        xpu_df = xpu_df.add_suffix('_xpu').rename(columns={"uniqname_xpu": "uniqname"}).drop(columns=['Reason_xpu', 'DetailReason_xpu'])
         # Merge with optimized parameters
-        merged = pd.merge(
+        merged_df = pd.merge(
             cuda_df,
             xpu_df,
             on="uniqname",
-            how="left",
-            suffixes=("_cuda", "_xpu"),
+            how="outer",
+            suffixes=("", "_duplicate"),
             sort=False,
             copy=False
         )
+        left_merged_df = merged_df.loc[(merged_df['device_cuda'].notna())]
+        xpu_only_merged_df = merged_df.loc[
+            (merged_df['device_cuda'].isna()) & (merged_df['device_xpu'].notna())
+        ]
 
-        # Drop duplicate columns if they exist
-        columns_to_drop = ['Reason_xpu', 'DetailReason_xpu']
-        if columns_to_drop:
-            merged = merged.drop(columns=columns_to_drop)
-
-        return merged
+        return (left_merged_df, xpu_only_merged_df)
 
     def filter_by_pattern(self, df: pd.DataFrame, column: str, pattern: str, invert: bool = False) -> pd.DataFrame:
         """Filter DataFrame by pattern in a column."""
@@ -983,7 +977,7 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Define conditions
-        cuda_passed = merged_df["status"] == "passed"
+        cuda_passed = merged_df["status_cuda"] == "passed"
         xpu_not_passed = (
             ~merged_df["status_xpu"].isin(["passed", "xfail"]) |
             merged_df["status_xpu"].isna()
@@ -991,50 +985,141 @@ class TestResultAnalyzer:
 
         return merged_df[cuda_passed & xpu_not_passed].copy()
 
-    def generate_statistics(self, df: pd.DataFrame | None = None) -> Dict[str, Any]:
-        """Generate comprehensive statistics."""
-        df = df if df is not None else self.get_unique_test_cases()
-
-        if df.empty:
-            return {}
-
-        stats = {
-            "total_unique_cases": len(df),
-            "by_device": {},
-            "by_status": {},
-            "by_test_type": {},
-        }
-
-        # Device statistics
-        if "device" in df.columns:
-            stats["by_device"] = df["device"].value_counts().to_dict()
-
-        # Status statistics
-        if "status" in df.columns:
-            stats["by_status"] = df["status"].value_counts().to_dict()
-
-        # Test type statistics
-        if "testtype" in df.columns:
-            stats["by_test_type"] = df["testtype"].value_counts().to_dict()
-
-        # Time statistics
-        if "time" in df.columns:
-            time_series = pd.to_numeric(df["time"], errors='coerce')
-            stats["time_stats"] = {
-                "total": time_series.sum(),
-                "mean": time_series.mean(),
-                "median": time_series.median(),
-                "max": time_series.max(),
-                "min": time_series.min(),
-                "std": time_series.std(),
-            }
-
-        return stats
-
 
 # ============================================================================
 # REPORT EXPORTER
 # ============================================================================
+
+class TestSummaryAnalyzer:
+    """Test result analyzer for generating statistics."""
+
+    def __init__(self, df: pd.DataFrame):
+        self.df = df.copy()
+        self.all_statuses = sorted(df['status'].unique())
+        print(f"Status types found: {list(self.all_statuses)}")
+
+    def analyze_by_category(self) -> pd.DataFrame:
+        """Analyze test results by device and test type categories."""
+
+        # Initialize result dictionary
+        results = []
+
+        # Get all device types
+        devices = sorted(self.df['device'].unique())
+
+        # Analyze each device
+        for device in devices:
+            device_df = self.df[self.df['device'] == device]
+
+            # Determine test types
+            for _, row in device_df.iterrows():
+                if '/inductor/' in str(row['testfile']):
+                    test_type = 'Inductor'
+                else:
+                    test_type = 'Non-inductor'
+
+                # Check if this combination already exists
+                found = False
+                for result in results:
+                    if result['Device'] == device and result['Type'] == test_type:
+                        found = True
+                        break
+
+                if not found:
+                    results.append({
+                        'Device': device,
+                        'Type': test_type,
+                        'total': 0
+                    })
+
+        # Add default combinations if no data
+        if not results:
+            results = [
+                {'Device': 'cpu', 'Type': 'Inductor', 'total': 0},
+                {'Device': 'cpu', 'Type': 'Non-inductor', 'total': 0},
+                {'Device': 'cuda', 'Type': 'Inductor', 'total': 0},
+                {'Device': 'cuda', 'Type': 'Non-inductor', 'total': 0}
+            ]
+
+        # Add status counts for each result
+        for result in results:
+            device = result['Device']
+            test_type = result['Type']
+
+            # Filter data
+            mask = (self.df['device'] == device)
+
+            # Filter by test type
+            if test_type == 'Inductor':
+                mask = mask & self.df['testfile'].str.contains('/inductor/', na=False)
+            else:
+                mask = mask & ~self.df['testfile'].str.contains('/inductor/', na=False)
+
+            filtered_df = self.df[mask]
+
+            # Update total count
+            result['total'] = len(filtered_df)
+
+            # Add count for each status
+            for status in self.all_statuses:
+                result[status] = len(filtered_df[filtered_df['status'] == status])
+
+        # Calculate pass rate (based on actual definition)
+        for result in results:
+            total = result['total']
+            if total > 0:
+                # Calculate execution rate (non-skipped ratio)
+                executed = total
+                for status in self.all_statuses:
+                    if 'skip' in status.lower():
+                        executed -= result[status]
+
+                # Calculate pass rate (among executed tests)
+                if 'passed' in result:
+                    result['pass_rate'] = f"{(result['passed'] / total * 100):.2f}%"
+                    result['execution_rate'] = f"{(executed / total * 100):.2f}%"
+                else:
+                    result['pass_rate'] = "0.00%"
+                    result['execution_rate'] = f"{(executed / total * 100):.2f}%"
+            else:
+                result['pass_rate'] = "0.00%"
+                result['execution_rate'] = "0.00%"
+
+        # Convert to DataFrame
+        result_df = pd.DataFrame(results)
+
+        # Ensure column order
+        columns = ['Device', 'Type'] + list(self.all_statuses) + ['total', 'pass_rate']
+        result_df = result_df.reindex(columns=[col for col in columns if col in result_df.columns])
+
+        return result_df
+
+    def get_testfile_merged_result(self, analyzer: TestResultAnalyzer) -> pd.DataFrame:
+        """主函数"""
+
+        file_stats = self.df.groupby(['device', 'testfile']).apply(
+            lambda x: pd.Series({
+                'total': len(x),
+                # 统计每种状态的数量
+                **{status: (x['status'] == status).sum() for status in self.all_statuses}
+            }),
+            include_groups=False  # 明确排除分组列
+        ).reset_index()
+
+        cuda_df, xpu_df = analyzer.split_by_device(file_stats)
+
+        merged = pd.merge(
+                cuda_df,
+                xpu_df,
+                on="testfile",
+                how="outer",
+                suffixes=("_cuda", "_xpu"),
+                sort=False,
+                copy=False
+            )
+
+        return merged
+
 
 class ReportExporter:
     """Export test results to various formats."""
@@ -1044,7 +1129,7 @@ class ReportExporter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _write_sheet_with_progress(self, writer: pd.ExcelWriter,
-                                   df: pd.DataFrame, sheet_name: str):
+                                   df: pd.DataFrame, sheet_name: str) -> None:
         """Write DataFrame to Excel with progress tracking."""
         if df.empty:
             return
@@ -1080,10 +1165,11 @@ class ReportExporter:
 
             if not cuda_df.empty and not xpu_df.empty:
                 # Generate merged results
-                merged_df = analyzer.merge_device_results(cuda_df, xpu_df)
+                (merged_df, xpu_only_merged_df) = analyzer.merge_device_results(cuda_df, xpu_df)
+                self._write_sheet_with_progress(writer, xpu_only_merged_df, "XPU only Cases")
 
                 # Filter with vectorized operations
-                inductor_mask = merged_df["testfile"].str.contains("/inductor/", na=False)
+                inductor_mask = merged_df["testfile_cuda"].str.contains("/inductor/", na=False)
 
                 # Process sheets
                 sheets = [
@@ -1111,10 +1197,13 @@ class ReportExporter:
                             self._write_sheet_with_progress(writer, df, sheet_name)
 
             # Add statistics sheet
-            stats = analyzer.generate_statistics(unique_df)
-            if stats:
-                stats_df = pd.DataFrame([stats])
-                stats_df.to_excel(writer, sheet_name="Statistics", index=False)
+            summary = TestSummaryAnalyzer(unique_df)
+            result_df = summary.analyze_by_category()
+            if not result_df.empty:
+                result_df.to_excel(writer, sheet_name="Statistics", index=False)
+            testfile_df = summary.get_testfile_merged_result(analyzer)
+            if not testfile_df.empty:
+                testfile_df.to_excel(writer, sheet_name="Test Files", index=False)
 
         return output_files
 
@@ -1131,8 +1220,10 @@ class ReportExporter:
 
         if not cuda_df.empty and not xpu_df.empty:
             # Generate merged results
-            merged_df = analyzer.merge_device_results(cuda_df, xpu_df)
-            inductor_mask = merged_df["testfile"].str.contains("/inductor/", na=False)
+            (merged_df, xpu_only_merged_df) = analyzer.merge_device_results(cuda_df, xpu_df)
+            inductor_mask = merged_df["testfile_cuda"].str.contains("/inductor/", na=False)
+            xpu_only_file = self.output_dir / f"{base_stem}_xpu_only_cases.csv"
+            xpu_only_merged_df.to_csv(xpu_only_file, index=False)
 
             inductor_merged = merged_df[inductor_mask]
             non_inductor_merged = merged_df[~inductor_mask]
@@ -1159,12 +1250,17 @@ class ReportExporter:
                     output_files[suffix] = filepath
 
             # Save statistics
-            stats = analyzer.generate_statistics(unique_df)
-            if stats:
-                stats_file = self.output_dir / f"{base_stem}_stats.json"
-                with open(stats_file, "w") as f:
-                    json.dump(stats, f, indent=2, default=str)
+            summary = TestSummaryAnalyzer(unique_df)
+            result_df = summary.analyze_by_category()
+            if not result_df.empty:
+                stats_file = self.output_dir / f"{base_stem}_stats.csv"
+                result_df.to_csv(stats_file, index=False)
                 output_files["stats"] = stats_file
+            testfile_df = summary.get_testfile_merged_result(analyzer)
+            if not testfile_df.empty:
+                stats_file = self.output_dir / f"{base_stem}_files.csv"
+                result_df.to_csv(stats_file, index=False)
+                output_files["files"] = stats_file
 
         return output_files
 
@@ -1232,9 +1328,6 @@ Examples:
   # Use glob pattern with parallel processing
   python get_details.py --input "results/**/*.xml" --output test_details.xlsx --parallel
 
-  # Debug mode with sequential processing
-  python get_details.py --input test.xml --output debug.csv --sequential --verbose
-
   # Profile performance
   python get_details.py --input test.xml --output output.xlsx --profile
 
@@ -1282,12 +1375,6 @@ Examples:
     )
 
     parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-
-    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug mode with extra logging",
@@ -1331,7 +1418,7 @@ Examples:
     args = parser.parse_args()
 
     # Configure logging
-    log_level = logging.DEBUG if args.debug else (logging.INFO if args.verbose else logging.WARNING)
+    log_level = logging.DEBUG if args.debug else logging.INFO
     logging.getLogger().setLevel(log_level)
 
     # Load configuration
@@ -1422,10 +1509,11 @@ Examples:
         print(f"🧪 Test cases found: {extractor.stats['test_cases_found']}")
         print(f"⏱️  Processing time: {extractor.stats['processing_time']:.2f}s")
         print(f"💾 Memory used: {extractor.stats['memory_used_mb']:.2f} MB")
-        print(f"📈 Unique test cases: {len(analyzer.get_unique_test_cases())}")
+
+        unique_df = analyzer.get_unique_test_cases()
+        print(f"📈 Unique test cases: {len(unique_df)}")
 
         # Show device distribution
-        unique_df = analyzer.get_unique_test_cases()
         if not unique_df.empty and "device" in unique_df.columns:
             device_counts = unique_df["device"].value_counts()
             print(f"📱 Device distribution:")
@@ -1445,9 +1533,8 @@ Examples:
 
         if extractor.failed_files:
             print(f"❌ Failed files: {len(extractor.failed_files)}")
-            if args.verbose:
-                for file, error in list(extractor.failed_files.items())[:3]:
-                    print(f"   - {file}: {error}")
+            for file, error in list(extractor.failed_files.items())[:3]:
+                print(f"   - {file}: {error}")
 
         print("=" * 60)
 
