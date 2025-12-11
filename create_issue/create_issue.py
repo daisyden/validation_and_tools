@@ -15,7 +15,7 @@ class FailureGroup:
     duplicated: list[str]
     new_duplicated: list[str]
 
-def write_issue_file(failure_group: FailureGroup, error_message: str, issue_folder: str, submit=False):
+def write_issue_file(failure_group: FailureGroup, error_message: str, issue_folder: str, submit=False, skiplist=None):
     filename = f'{issue_folder}/issue_group{failure_group.id}.txt'
     with open(filename, 'w') as f:
         if "test/xpu" in failure_group.skipped[0] or "xpu.py" in failure_group.skipped[0]:
@@ -44,10 +44,25 @@ def write_issue_file(failure_group: FailureGroup, error_message: str, issue_fold
         if submit:
             gh = Github_Issue("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"))
             print(f"Wrote merged issue file: {filename}")
-            return gh.create_issue_with_label(title, body=content, labels=["skipped"])
+            issue_id = gh.create_issue_with_label(title, body=content, labels=["skipped"])
 
+        if skiplist is not None:
+            f.write("[xpu_triage_bot]: Skiplist comments:\n")
+            comments = []
+            for case in cases.split('\n'):
+                print(case)
+                test_class = case.split(',')[1]
+                test_file = test_class.split('.')[-2] + '.py'
+                test_case = case.split(',')[2]
+                skip_reason_row = skiplist[(skiplist['File'] == test_file) & (skiplist['Testcase'] == test_case)]
+                if skip_reason_row is not None and len(skip_reason_row['Skipreason'].values) > 0:
+                    comments.append(f"{test_file}|{test_case}|{skip_reason_row['Skipreason'].values[0]}")                
+            if submit:
+                gh.add_comment(f"\n\n[xpu_triage_bot]:\n Skiplist comments:\n" + '\n'.join(comments), issue_id)
+            else:
+                f.write('\n'.join(comments))
     print(f"Wrote issue file: {filename}")
-    return -1
+    return issue_id if submit else -1
 
 
 def get_duplicated_known_issues(failure_group: FailureGroup, error_message: str, issue_folder: str, ratio: float = 0.7):
@@ -151,8 +166,7 @@ def main():
     df = df.rename(columns={df.columns[1]: 'Category', df.columns[2]: 'Class', df.columns[3]: 'Testcase', df.columns[4]: 'Result', df.columns[5]: 'ErrorMessage'})
     df = df[['Class', 'Testcase', 'Result', 'ErrorMessage']]
 
-    import pdb
-    pdb.set_trace()
+    
     import os
     issues_folder = os.path.curdir + "/issues"
     if os.path.exists(issues_folder) is True:
@@ -182,6 +196,12 @@ def main():
     #     import subprocess
     #     env_info = subprocess.check_output(['python', 'collect_env.py']).decode()
 
+    df_skip = None
+    if args.skiplist is not None:
+        df_skip = pd.read_csv("skiplist_map.csv", delimiter='|', engine='python', header=None)
+        df_skip = df_skip.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        df_skip = df_skip.rename(columns={df_skip.columns[0]: 'File', df_skip.columns[1]: 'Testcase', df_skip.columns[2]: 'Skipreason'})
+
     id = 0
     failure_group_list = []
     for group in df.groupby(['ErrorMessage']):
@@ -203,6 +223,10 @@ def main():
             failure_group.skipped.append(line)
             failure_group.commands.append(pytest_command)
             xml_file = _test_file + '.xml'
+            if not os.path.exists(xml_file):
+                if os.path.exists(f"third_party/torch-xpu-ops/test/xpu/op_ut_with_ext.{test_file.split('/')[-1].replace('.py', '.xml')}"):
+                    xml_file = f"third_party/torch-xpu-ops/test/xpu/op_ut_with_ext.{test_file.split('/')[-1].replace('.py', '.xml')}"
+
             try:
                 import xml.etree.ElementTree as ET
                 tree = ET.parse(xml_file)
@@ -243,14 +267,19 @@ def main():
         # Write final issues
         for fg in failure_group_list:
             # Dump the merge issue groups
-            issue_id = write_issue_file(fg, fg.error_msg, merged_issues_folder, submit=args.submit)
+            issue_id = write_issue_file(fg, fg.error_msg, merged_issues_folder, submit=args.submit, skiplist=df_skip)
             if args.known:
                 # Find duplicated issues of xpu-ops repo
                 fg.duplicated = get_duplicated_known_issues(fg, fg.error_msg, xpu_issues_folder, args.ratio)
                 if args.submit and len(fg.duplicated) > 0:
                     gh = Github_Issue("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"))
                     duplicated_issues = [ f"#{_issue_id}" for _issue_id in fg.duplicated if _issue_id != issue_id ]
-                    gh.add_comment(f"[xpu_triage_bot]:\n Possible related issues: {duplicated_issues}", issue_id)
+                    if duplicated_issues:
+                        gh.add_comment(f"[xpu_triage_bot]:\n Possible related issues: {duplicated_issues}", issue_id)
+                    else:
+                        gh.add_comment(f"[xpu_triage_bot]:\n Possible related issues: Not found", issue_id)
+                               
+
     
     print("\n\n### Final Failure Groups and their known duplicated issues:")
     print("issue_folder:", issues_folder if not args.merge else merged_issues_folder)
@@ -267,5 +296,6 @@ if __name__ == "__main__":
     parser.add_argument('--ai', action='store_true', default=False, help="Use AI for duplicate issue detection")
     parser.add_argument('--ratio', type=float, default=0.7, help="Similarity ratio threshold for duplicate detection")
     parser.add_argument('--submit', action='store_true', default=False, help="Submit issues to GitHub")
+    parser.add_argument('--skiplist', type=str, help="skiplist")
     args = parser.parse_args()
     main()

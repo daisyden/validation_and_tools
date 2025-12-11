@@ -10,9 +10,18 @@ ut_failure_list.csv will be generated
 
 Command:
 ```
+# parse the skip_list_common.py and generate a csv file with skip reason mapped to test case.
+# skiplist_map.csv will be created
+python fill_skipped.py
+
 # merge issues and check duplicated issue with xpu-ops repo, ratio is the threashold to check similarity and it is adjsutable
 # finially the merged issue will be submitted to github. Please ensure the "repo" scope is checked for your github token.
 GITHUB_TOKEN=<token> python create_issue.py --merge --known --ratio 0.7 --submit
+
+# merge issues and check duplicated issue with xpu-ops repo, ratio is the threashold to check similarity and it is adjsutable
+# finially the merged issue will be submitted to github, the skiplist comments would also be added in description. Please ensure the "repo" scope is checked for your github token.
+GITHUB_TOKEN=<token> python create_issue.py --merge --known --ratio 0.7 --submit --skiplist skiplistt_map.csv
+
 
 # merge issues
 GITHUB_TOKEN=<token> python create_issue.py --merge --ratio 0.7
