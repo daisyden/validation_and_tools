@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, T
 from xml.etree import ElementTree as ET
 from xml.parsers.expat import ExpatError
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tqdm import tqdm
@@ -894,7 +895,7 @@ class TestResultAnalyzer:
         reson_df_clean['device'] = 'cuda'
 
         # Merge with optimized parameters
-        return pd.merge(
+        output = pd.merge(
             self.dataframe,
             reson_df_clean,
             on=['device', 'testfile', 'classname', 'name'],
@@ -902,6 +903,18 @@ class TestResultAnalyzer:
             sort=False,
             copy=False
         )
+
+        # Set default reason
+        output['Reason'] = output['Reason'].replace('', np.nan)
+        output['Reason'] = np.where(
+            (output['last_status'] == 'passed') &
+            (output['status'] != 'passed') &
+            (output['Reason'].isna()),
+            'New skip caused by infra',
+            output['Reason']
+        )
+
+        return output
 
     def get_unique_test_cases(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """Get deduplicated test cases with status priority."""
