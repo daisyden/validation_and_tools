@@ -878,7 +878,7 @@ class TestResultAnalyzer:
             how="left",
             sort=False,  # Disable sorting for better performance
             copy=False   # Avoid unnecessary copying
-        )
+        ).fillna('')
 
     def merge_last_reasons_optimized(self, reson_df: pd.DataFrame) -> pd.DataFrame:
         """Optimized merge of last reasons."""
@@ -895,26 +895,14 @@ class TestResultAnalyzer:
         reson_df_clean['device'] = 'cuda'
 
         # Merge with optimized parameters
-        output = pd.merge(
+        return pd.merge(
             self.dataframe,
             reson_df_clean,
             on=['device', 'testfile', 'classname', 'name'],
             how='left',
             sort=False,
             copy=False
-        )
-
-        # Set default reason
-        output['Reason'] = output['Reason'].replace('', np.nan)
-        output['Reason'] = np.where(
-            (output['last_status'] == 'passed') &
-            (output['status'] != 'passed') &
-            (output['Reason'].isna()),
-            'New skip caused by infra',
-            output['Reason']
-        )
-
-        return output
+        ).fillna('')
 
     def get_unique_test_cases(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """Get deduplicated test cases with status priority."""
@@ -981,10 +969,10 @@ class TestResultAnalyzer:
             suffixes=("", "_duplicate"),
             sort=False,
             copy=False
-        )
-        left_merged_df = merged_df.loc[(merged_df['device_cuda'].notna())]
+        ).fillna('')
+        left_merged_df = merged_df.loc[(merged_df['device_cuda'].isin(['cuda']))]
         xpu_only_merged_df = merged_df.loc[
-            (merged_df['device_cuda'].isna()) & (merged_df['device_xpu'].notna())
+            (~merged_df['device_cuda'].isin(['cuda'])) & (merged_df['device_xpu'].isin(['xpu']))
         ]
 
         return (left_merged_df, xpu_only_merged_df)
@@ -1006,13 +994,23 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Define conditions
-        cuda_passed = merged_df["status_cuda"] == "passed"
+        cuda_passed = merged_df["status_cuda"].isin(["passed"])
         xpu_not_passed = (
-            ~merged_df["status_xpu"].isin(["passed", "xfail"]) |
-            merged_df["status_xpu"].isna()
+            ~merged_df["status_xpu"].isin(["passed"]) | merged_df["status_xpu"].isna()
+        )
+        output = merged_df[cuda_passed & xpu_not_passed].copy()
+
+        # Set default reason
+        output['Reason'] = output['Reason'].replace('', np.nan)
+        output['Reason'] = np.where(
+            (output['last_status_xpu'].isin(["passed"])) &
+            (~output['status_xpu'].isin(["passed"])) &
+            (output['Reason'].isna()),
+            'New skip caused by infra',
+            output['Reason']
         )
 
-        return merged_df[cuda_passed & xpu_not_passed].copy()
+        return output
 
 
 # ============================================================================
