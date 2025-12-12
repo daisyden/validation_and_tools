@@ -127,6 +127,7 @@ class TestStatus(Enum):
             "fail": cls.FAILED,
             "error": cls.ERROR,
             "skip": cls.SKIPPED,
+            "xpu-default": cls.PASSED,
             "": cls.NOTRUN,
         }
 
@@ -458,6 +459,7 @@ class FilePatternMatcher:
 
         if testtype in ['xpu-distributed', 'xpu-ops']:
             normalized = normalized.replace("_xpu_xpu.py", ".py").replace("_xpu.py", ".py")
+        normalized = re.sub(r'.*/jenkins/workspace/', '', normalized, flags=re.IGNORECASE)
 
         return normalized or "unknown_file.py"
 
@@ -909,15 +911,29 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Add priority column using TestStatus enum
-        df["_priority"] = df["status"].apply(
+        df['_name'] = [k in t for k, t in zip(df['device'], df['name'])]
+        df["_testtype"] = df["testtype"].apply(
+            lambda x: TestStatus.from_string(x).priority
+        )
+        df["_status"] = df["status"].apply(
             lambda x: TestStatus.from_string(x).priority
         )
 
-        # Group and select highest priority
-        group_cols = ["device", "uniqname", "testfile", "classname", "name"]
-        idx = df.groupby(group_cols)["_priority"].idxmax()
+        # Define group columns and sort columns
+        group_cols = ["device", "uniqname", "testfile", "classname"]
 
-        result = df.loc[idx].drop("_priority", axis=1).reset_index(drop=True)
+        # Sort by priority first (descending for highest priority), then other columns
+        sort_cols = ["_name", "_testtype", "_status"]
+        sort_ascs = [False, False, False]
+
+        # Sort the dataframe
+        df_sorted = df.sort_values(by=sort_cols, ascending=sort_ascs)
+
+        # Drop duplicates keeping first occurrence (highest priority due to sorting)
+        result = df_sorted.drop_duplicates(subset=group_cols, keep='first')
+
+        # Clean up and reset index
+        result = result.drop(columns=["_name", "_testtype", "_status"], axis=1).reset_index(drop=True)
 
         return result
 
