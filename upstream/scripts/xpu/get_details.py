@@ -403,12 +403,12 @@ class FilePatternMatcher:
 
     # Test type detection patterns
     TEST_TYPE_PATTERNS = {
-        "xpu-default": [r"-test-default-.*-linux\.idc\.xpu_"],
-        "xpu-unknown": [r"linux\.idc\.xpu_"],
-        "cuda-default": [r"-test-default-.*(nvidia\.gpu|dgx\.)"],
-        "cuda-inductor": [r"-test-inductor-.*(nvidia\.gpu|dgx\.)"],
-        "cuda-distributed": [r"-test-distributed-.*(nvidia\.gpu|dgx\.)"],
-        "cuda-unknown": [r"(nvidia\.gpu|dgx\.)"],
+        "xpu-default": [r"-test-default.*linux\.idc\.xpu"],
+        "xpu-unknown": [r"linux\.idc\.xpu"],
+        "cuda-default": [r"-test-default.*(nvidia|linux.dgx)"],
+        "cuda-inductor": [r"-test-inductor.*(nvidia|linux.dgx)"],
+        "cuda-distributed": [r"-test-distributed.*(nvidia|linux.dgx)"],
+        "cuda-unknown": [r"(nvidia|linux.dgx)"],
         "xpu-distributed": [r"xpu_distributed"],
         "xpu-ops": [r"op_ut_with_"],
     }
@@ -875,7 +875,7 @@ class TestResultAnalyzer:
             self.dataframe,
             last_df_clean,
             on=["uniqname", "testfile", "classname", "name", "device"],
-            how="left",
+            how="outer",
             sort=False,  # Disable sorting for better performance
             copy=False   # Avoid unnecessary copying
         ).fillna('')
