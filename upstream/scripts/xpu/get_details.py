@@ -1009,6 +1009,14 @@ class TestResultAnalyzer:
             'New skip caused by infra',
             output['Reason']
         )
+        output['Reason'] = np.where(
+            (~output['last_status_cuda'].isin(["passed"])) &
+            (output['status_cuda'].isin(["passed"])) &
+            (~output['status_xpu'].isin(["passed"])) &
+            (output['Reason'].isna()),
+            'Cuda new pass cases',
+            output['Reason']
+        )
 
         return output
 
