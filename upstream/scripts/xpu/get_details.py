@@ -924,8 +924,8 @@ class TestResultAnalyzer:
         group_cols = ["device", "uniqname", "testfile", "classname"]
 
         # Sort by priority first (descending for highest priority), then other columns
-        sort_cols = ["_name", "_testtype", "_status"]
-        sort_ascs = [False, False, False]
+        sort_cols = ["_name", "_status"]
+        sort_ascs = [False, False]
 
         # Sort the dataframe
         df_sorted = df.sort_values(by=sort_cols, ascending=sort_ascs)
@@ -1029,8 +1029,8 @@ class TestSummaryAnalyzer:
     """Test result analyzer for generating statistics."""
 
     def __init__(self, df: pd.DataFrame):
-        self.df = df.copy()
-        self.all_statuses = sorted(df['status'].unique())
+        self.df = df[df["status"].fillna("") != ""].copy()
+        self.all_statuses = sorted(self.df['status'].unique())
         print(f"Status types found: {list(self.all_statuses)}")
 
     def analyze_by_category(self) -> pd.DataFrame:
