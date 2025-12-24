@@ -818,11 +818,12 @@ class TestDetailsExtractor:
 class TestResultAnalyzer:
     """Analyze and manipulate test results."""
 
-    def __init__(self, test_cases: List[TestCase], last_df: pd.DataFrame, reson_df: pd.DataFrame):
+    def __init__(self, test_cases: List[TestCase], last_df: pd.DataFrame, reson_df: pd.DataFrame, pattern_matcher: Optional[FilePatternMatcher] = None,):
         self.test_cases = test_cases
         self.dataframe = self._create_dataframe_optimized()
         self.dataframe = self.merge_last_results_optimized(last_df)
         self.dataframe = self.merge_last_reasons_optimized(reson_df)
+        self.pattern_matcher = pattern_matcher or FilePatternMatcher()
 
     def _create_dataframe_optimized(self) -> pd.DataFrame:
         """Create DataFrame from test cases with optimization."""
@@ -912,7 +913,9 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Add priority column using TestStatus enum
-        df['_name'] = [k in t for k, t in zip(df['device'], df['name'])]
+        df['_name'] = df.apply(lambda x: self.pattern_matcher._GPU_PATTERN.sub("cuda", x['device']) in self.pattern_matcher._GPU_PATTERN.sub("cuda", x['name']), axis=1)
+        df['_classname'] = df.apply(lambda x: self.pattern_matcher._GPU_PATTERN.sub("cuda", x['device']) in self.pattern_matcher._GPU_PATTERN.sub("cuda", x['classname']), axis=1)
+        df['_testfile'] = df.apply(lambda x: self.pattern_matcher._GPU_PATTERN.sub("cuda", x['device']) in self.pattern_matcher._GPU_PATTERN.sub("cuda", x['testfile']), axis=1)
         df["_testtype"] = df["testtype"].apply(
             lambda x: TestStatus.from_string(x).priority
         )
@@ -921,20 +924,17 @@ class TestResultAnalyzer:
         )
 
         # Define group columns and sort columns
-        group_cols = ["device", "uniqname", "testfile", "classname"]
-
+        group_cols = ["device", "uniqname"]
         # Sort by priority first (descending for highest priority), then other columns
-        sort_cols = ["_name", "_status"]
-        sort_ascs = [False, False]
-
+        sort_cols = ["_name", "_classname", "_testfile", "_status"]
+        sort_ascs = [False, False, False, False]
         # Sort the dataframe
         df_sorted = df.sort_values(by=sort_cols, ascending=sort_ascs)
 
         # Drop duplicates keeping first occurrence (highest priority due to sorting)
         result = df_sorted.drop_duplicates(subset=group_cols, keep='first')
-
         # Clean up and reset index
-        result = result.drop(columns=["_name", "_testtype", "_status"], axis=1).reset_index(drop=True)
+        result = result.drop(columns=["_name", "_classname", "_testfile", "_testtype", "_status"], axis=1).reset_index(drop=True)
 
         return result
 
@@ -1029,8 +1029,8 @@ class TestSummaryAnalyzer:
     """Test result analyzer for generating statistics."""
 
     def __init__(self, df: pd.DataFrame):
-        self.df = df[df["status"].fillna("") != ""].copy()
-        self.all_statuses = sorted(self.df['status'].unique())
+        self.df = df.copy()
+        self.all_statuses = sorted(df['status'].unique())
         print(f"Status types found: {list(self.all_statuses)}")
 
     def analyze_by_category(self) -> pd.DataFrame:
