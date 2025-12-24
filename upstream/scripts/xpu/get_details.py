@@ -1002,21 +1002,25 @@ class TestResultAnalyzer:
 
         # Set default reason
         output['Reason'] = output['Reason'].replace('', np.nan)
-        output['Reason'] = np.where(
+        conditions = [
+            # First priority: Copy DetailReason if Reason is empty
+            output['Reason'].isna(),
+            # Second: New skip cases where XPU regressed from passed
             (output['last_status_xpu'].isin(["passed"])) &
             (~output['status_xpu'].isin(["passed"])) &
             (output['Reason'].isna()),
-            'New skip caused by infra',
-            output['Reason']
-        )
-        output['Reason'] = np.where(
+            # Third: CUDA newly passing but XPU still failing
             (~output['last_status_cuda'].isin(["passed"])) &
             (output['status_cuda'].isin(["passed"])) &
             (~output['status_xpu'].isin(["passed"])) &
-            (output['Reason'].isna()),
-            'Cuda new pass cases',
-            output['Reason']
-        )
+            (output['Reason'].isna())
+        ]
+        choices = [
+            output['DetailReason'],
+            'New skip caused by infra',
+            'Cuda new pass cases'
+        ]
+        output['Reason'] = np.select(conditions, choices, default=output['Reason'])
 
         return output
 
