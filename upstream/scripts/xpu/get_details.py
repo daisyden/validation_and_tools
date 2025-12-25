@@ -954,12 +954,8 @@ class TestResultAnalyzer:
             return pd.DataFrame()
 
         # Add suffix
-        cuda_df = cuda_df.add_suffix('_cuda').rename(columns={
-            "uniqname_cuda": "uniqname",
-            "Reason_cuda": "Reason",
-            "DetailReason_cuda": "DetailReason",
-        })
-        xpu_df = xpu_df.add_suffix('_xpu').rename(columns={"uniqname_xpu": "uniqname"}).drop(columns=['Reason_xpu', 'DetailReason_xpu'])
+        cuda_df = cuda_df.add_suffix('_cuda').rename(columns={"uniqname_cuda": "uniqname"})
+        xpu_df = xpu_df.add_suffix('_xpu').rename(columns={"uniqname_xpu": "uniqname"})
         # Merge with optimized parameters
         merged_df = pd.merge(
             cuda_df,
@@ -970,6 +966,35 @@ class TestResultAnalyzer:
             sort=False,
             copy=False
         ).fillna('')
+
+        # merge xpu and cuda reasons
+        conditions = [(merged_df['Reason_cuda'].isin([""])) & (~merged_df['Reason_xpu'].isin([""]))]
+        choices = [merged_df['Reason_xpu']]
+        merged_df['Reason_cuda'] = np.select(conditions, choices, default=merged_df['Reason_cuda'])
+        # detail reasons
+        conditions = [(merged_df['DetailReason_cuda'].isin([""])) & (~merged_df['DetailReason_xpu'].isin([""]))]
+        choices = [merged_df['DetailReason_xpu']]
+        merged_df['DetailReason_cuda'] = np.select(conditions, choices, default=merged_df['DetailReason_cuda'])
+        #
+        merged_df = merged_df.rename(columns={
+            "Reason_cuda": "Reason",
+            "DetailReason_cuda": "DetailReason",
+        }).drop(columns=[
+            'Reason_xpu',
+            'DetailReason_xpu',
+        ])[[
+            "uniqname",
+            "device_cuda", "testtype_cuda",
+            "testfile_cuda", "classname_cuda", "name_cuda",
+            "device_xpu", "testtype_xpu",
+            "testfile_xpu", "classname_xpu", "name_xpu",
+            "message_cuda", "time_cuda", "last_time_cuda",
+            "message_xpu", "time_xpu", "last_time_xpu",
+            "last_status_cuda", "status_cuda",
+            "last_status_xpu", "status_xpu",
+            "Reason", "DetailReason"
+        ]]
+
         left_merged_df = merged_df.loc[(merged_df['device_cuda'].isin(['cuda']))]
         xpu_only_merged_df = merged_df.loc[
             (~merged_df['device_cuda'].isin(['cuda'])) & (merged_df['device_xpu'].isin(['xpu']))
@@ -1499,12 +1524,18 @@ Examples:
                 last_df = last_df['All Test Cases']
 
             if args.inductor is not None:
-                last_inductor_dfs = load_last_details(args.inductor, ['Cuda pass xpu skip', 'to_be_enabled'])
-                dataframes_to_concat.extend(last_inductor_dfs.values())
+                last_inductor_dfs = load_last_details(args.inductor, ['Cuda pass xpu skip'])
+                # Extract specific sheet
+                if 'Cuda pass xpu skip' in last_inductor_dfs:
+                    dataframes_to_concat.append(last_inductor_dfs['Cuda pass xpu skip'])
 
             if args.non_inductor is not None:
                 last_non_inductor_dfs = load_last_details(args.non_inductor, ['Non-Inductor XPU Skip'])
-                dataframes_to_concat.append(last_non_inductor_dfs['Non-Inductor XPU Skip'])
+                # Add both sheets
+                if 'Non-Inductor XPU Skip' in last_non_inductor_dfs:
+                    dataframes_to_concat.append(last_non_inductor_dfs['Non-Inductor XPU Skip'])
+                # if 'Sheet1' in last_non_inductor_dfs:
+                #     dataframes_to_concat.append(last_non_inductor_dfs['Sheet1'])
 
             # Combine all DataFrames if we have any
             if dataframes_to_concat:
