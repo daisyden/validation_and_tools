@@ -893,13 +893,13 @@ class TestResultAnalyzer:
             "Class": "classname",
             "Testcase": "name",
         })
-        reson_df_clean['device'] = 'cuda'
+        # reson_df_clean['device'] = 'cuda'
 
         # Merge with optimized parameters
         return pd.merge(
             self.dataframe,
             reson_df_clean,
-            on=['device', 'testfile', 'classname', 'name'],
+            on=['testfile', 'classname', 'name'],
             how='left',
             sort=False,
             copy=False
@@ -1530,12 +1530,12 @@ Examples:
                     dataframes_to_concat.append(last_inductor_dfs['Cuda pass xpu skip'])
 
             if args.non_inductor is not None:
-                last_non_inductor_dfs = load_last_details(args.non_inductor, ['Non-Inductor XPU Skip'])
+                last_non_inductor_dfs = load_last_details(args.non_inductor, ['Non-Inductor XPU Skip', 'Sheet1'])
                 # Add both sheets
                 if 'Non-Inductor XPU Skip' in last_non_inductor_dfs:
                     dataframes_to_concat.append(last_non_inductor_dfs['Non-Inductor XPU Skip'])
-                # if 'Sheet1' in last_non_inductor_dfs:
-                #     dataframes_to_concat.append(last_non_inductor_dfs['Sheet1'])
+                if 'Sheet1' in last_non_inductor_dfs:
+                    dataframes_to_concat.append(last_non_inductor_dfs['Sheet1'])
 
             # Combine all DataFrames if we have any
             if dataframes_to_concat:
