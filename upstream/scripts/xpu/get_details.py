@@ -968,11 +968,10 @@ class TestResultAnalyzer:
         ).fillna('')
 
         # merge xpu and cuda reasons
-        conditions = [(merged_df['Reason_cuda'].isin([""])) & (~merged_df['Reason_xpu'].isin([""]))]
+        conditions = [(merged_df['Reason_cuda'].isin(["", "To be enabled"])) & (~merged_df['Reason_xpu'].isin([""]))]
         choices = [merged_df['Reason_xpu']]
         merged_df['Reason_cuda'] = np.select(conditions, choices, default=merged_df['Reason_cuda'])
         # detail reasons
-        conditions = [(merged_df['DetailReason_cuda'].isin([""])) & (~merged_df['DetailReason_xpu'].isin([""]))]
         choices = [merged_df['DetailReason_xpu']]
         merged_df['DetailReason_cuda'] = np.select(conditions, choices, default=merged_df['DetailReason_cuda'])
         #
