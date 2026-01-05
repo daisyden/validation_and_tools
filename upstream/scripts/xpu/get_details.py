@@ -887,11 +887,11 @@ class TestResultAnalyzer:
             return self.dataframe
 
         # Prepare reson_df
-        reson_df_clean = reson_df[['Testfile', 'Class', 'Testcase', 'Reason', 'DetailReason']].copy()
+        reson_df_clean = reson_df[['testfile_cuda', 'classname_cuda', 'name_cuda', 'Reason', 'DetailReason']].copy()
         reson_df_clean = reson_df_clean.rename(columns={
-            "Testfile": "testfile",
-            "Class": "classname",
-            "Testcase": "name",
+            "testfile_cuda": "testfile",
+            "classname_cuda": "classname",
+            "name_cuda": "name",
         })
         # reson_df_clean['device'] = 'cuda'
 
@@ -1529,12 +1529,12 @@ Examples:
                     dataframes_to_concat.append(last_inductor_dfs['Cuda pass xpu skip'])
 
             if args.non_inductor is not None:
-                last_non_inductor_dfs = load_last_details(args.non_inductor, ['Non-Inductor XPU Skip', 'Sheet1'])
+                last_non_inductor_dfs = load_last_details(args.non_inductor, ['Non-Inductor XPU Skip'])
                 # Add both sheets
                 if 'Non-Inductor XPU Skip' in last_non_inductor_dfs:
                     dataframes_to_concat.append(last_non_inductor_dfs['Non-Inductor XPU Skip'])
-                if 'Sheet1' in last_non_inductor_dfs:
-                    dataframes_to_concat.append(last_non_inductor_dfs['Sheet1'])
+                # if 'Sheet1' in last_non_inductor_dfs:
+                #     dataframes_to_concat.append(last_non_inductor_dfs['Sheet1'])
 
             # Combine all DataFrames if we have any
             if dataframes_to_concat:
