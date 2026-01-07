@@ -38,8 +38,9 @@ def write_issue_file(failure_group: FailureGroup, error_message: str, issue_fold
         f.write(f"\nError Message:\n{error_message}\n")
         
         f.write("\nTrace Example:\n")
-        content += "\nTrace Example:\n" +  failure_group.tracees[-1]
-        f.write(failure_group.tracees[-1])
+        if len(failure_group.tracees) > 0:
+            content += "\nTrace Example:\n" +  failure_group.tracees[-1]
+            f.write(failure_group.tracees[-1])
 
         if submit:
             gh = Github_Issue("intel/torch-xpu-ops", os.getenv("GITHUB_TOKEN"))
@@ -207,25 +208,48 @@ def main():
     for group in df.groupby(['ErrorMessage']):
         failure_group = FailureGroup(id=id, error_msg=group[0][0], skipped=[], commands=[], tracees=[], duplicated=[], new_duplicated=[])
         for row in group[1].itertuples(index=False):
-            test_class = row.Class.strip()
-            _test_file = '/'.join(test_class.split('.')[:-1])
-            test_file = _test_file + '.py'
+            if "::" in row.Class:
+                test_class = row.Class.split("::")[-1].strip()
+                test_file = row.Class.split('::')[0].strip()
+                row_test_file = test_file.split('/')[-1]
+                file_path = '/'.join(test_file.split('/')[:-1])
+                test_class = test_file.replace('.py', '').replace('/', '.') + '.' + test_class
+                file_path = 'test/' + file_path
+                xml_file = file_path + '/' + test_file.replace('/', '.').replace('.py', '.xml')
+            else:
+                test_class = row.Class.strip()
+                _test_file = '/'.join(test_class.split('.')[:-1])
+                test_file = _test_file + '.py'
+                xml_file = test_file.replace('.py', '.xml')
             test_case = row.Testcase.strip()
             line = f"op_ut,{test_class},{test_case}"
             if "_xpu.py" in test_file or "/xpu/" in test_file:
                 if "extended" in test_file:
-                    pytest_command = f"cd <pytorch> "
+                    pytest_command = f"cd <pytorch>/third_party/torch-xpu-ops/test/xpu/extended "
                 else:
-                    pytest_command = f"cd <pytorch> "
+                    pytest_command = f"cd <pytorch>/third_party/torch-xpu-ops/test/xpu "
             else:
                 pytest_command = f"cd <pytorch>"
             pytest_command += f" && PYTORCH_TEST_WITH_SLOW=1 pytest -v {test_file} -k {test_case}"
             failure_group.skipped.append(line)
             failure_group.commands.append(pytest_command)
-            xml_file = _test_file + '.xml'
+            
+    
             if not os.path.exists(xml_file):
                 if os.path.exists(f"third_party/torch-xpu-ops/test/xpu/op_ut_with_ext.{test_file.split('/')[-1].replace('.py', '.xml')}"):
                     xml_file = f"third_party/torch-xpu-ops/test/xpu/op_ut_with_ext.{test_file.split('/')[-1].replace('.py', '.xml')}"
+                else:
+                    if "::" in row.Class:
+                        import glob
+                        test_xml_files = glob.glob(os.path.join(file_path, f"{os.path.basename(xml_file).replace('.xml', '')}*"))
+                        if len(test_xml_files) > 0:
+                            for _xml_file in test_xml_files:
+                                if os.path.exists(_xml_file):
+                                    xml_file = _xml_file
+                                    with open(_xml_file, 'r') as f:
+                                        if test_case in f.read():
+                                            xml_file = _xml_file
+                                            break
 
             try:
                 import xml.etree.ElementTree as ET
@@ -297,5 +321,6 @@ if __name__ == "__main__":
     parser.add_argument('--ratio', type=float, default=0.7, help="Similarity ratio threshold for duplicate detection")
     parser.add_argument('--submit', action='store_true', default=False, help="Submit issues to GitHub")
     parser.add_argument('--skiplist', type=str, help="skiplist")
+    parser.add_argument('--stockci', action='store_true', default=False, help="Use stockci artifacts xml files")
     args = parser.parse_args()
     main()
