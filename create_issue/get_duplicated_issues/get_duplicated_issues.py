@@ -10,7 +10,8 @@ def download_issue_content(issue):
         skipped = "Yes"
     if issue.body is not None:
         content += issue.body + "\n"
-    content = content.split('Versions')[0]
+    
+    content = content.split('### Versions')[0]
     comments = issue.get_comments()
     comment = ""
     for _comment in comments:
@@ -37,6 +38,30 @@ def download_all_open_issues_and_get_skiplist(repo:str, token:str, xpu_issues_fo
             f.write("\n" + "="*80 + "\n\n")
             print(f"Downloaded issue #{issue.number} to file.")
     return skip_list
+
+def download_all_open_issues_and_get_issue_with_label(repo:str, token:str, xpu_issues_folder:str, only_skipped:bool=False):
+    gh = Github_Issue(repo, token)
+    issues = gh.get_issues(state="open")
+
+    issue_list = []
+    for issue in issues:
+        if only_skipped == False:
+            issue_list.append((f"{issue.number}.txt", f"{issue.assignee.login if issue.assignee is not None else 'Unassigned'}", ','.join([label.name for label in issue.labels])))
+        elif "skipped" in [label.name for label in issue.labels]:
+            issue_list.append((f"{issue.number}.txt", f"{issue.assignee.login if issue.assignee is not None else 'Unassigned'}", ','.join([label.name for label in issue.labels])))
+
+        import os
+        if os.path.exists(f"{xpu_issues_folder}/{issue.number}.txt"):
+            #print(f"Issue #{issue.number} already downloaded.")
+            continue
+        content = download_issue_content(issue)
+        with open(f"{xpu_issues_folder}/{issue.number}.txt", "w", encoding="utf-8") as f:
+            f.write(f"Issue #{issue.number}: {issue.title}\n")
+            f.write(content)
+            f.write("\n" + "="*80 + "\n\n")
+            print(f"Downloaded issue #{issue.number} to file.")
+        
+    return issue_list
 
 def get_duplicated_issues(id: str, skipped:list, error_message:str, trace:str, issue_folder:str, ratio: float):
     print(f"\n\n### Checking duplicated issues for group {id} with {error_message} ...\n")
