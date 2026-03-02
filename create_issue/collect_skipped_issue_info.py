@@ -92,8 +92,8 @@ def main():
             
     if not args.merge_only:
         for skip_issue, owner, labels in skip_issues:   
-            
-            print(f"Skipped issue file: {skip_issue}")
+            id = skip_issue.replace('.txt', '')
+            print(f"Skipped issue file: {id}")
             
             with open(f"{xpu_issues_folder}/{skip_issue}", "r", encoding="utf-8") as f:
                 content = f.read()
@@ -129,6 +129,7 @@ def main():
                                 test_xml = f"{artifacts}/op_ut_with_all." + test_file.replace(".py", ".xml").replace("/", ".")                            
                                 if test_xml is not None and not os.path.exists(test_xml):
                                     test_xml = None
+                            trace = ""
                             if test_xml is not None:
                                 trace = get_trace(test_xml, test_case, f"pytest -m xpu {test_file} -k {test_case}")
 
@@ -158,19 +159,24 @@ def main():
                             escaped_trace = trace.replace('"', '""').replace('\n', '\\n')
                             
                             _test_file = f"test/xpu/{test_file}" if not stock else f"test/{test_file}"
-                            updated = False
+                            duplicated = False
+                            
                             for i, line in enumerate(dynamic_skiped1):
-                                if f"{_test_file}|{items[1].split('.')[-1]}|{test_case}" in line:
-                                    issue_ids = f"{line.split('|')[4]},issues/{skip_issue.replace('.txt', '')}<{owner}>"
-                                    labels = f"{line.split('|')[6]},{labels}"
-                                    labels = ",".join(sorted(set(labels.split(','))))                                
-                                    dynamic_skiped1[i] = f"{_test_file}|{items[1].split('.')[-1]}|{test_case}|{error_type}|{issue_ids}|{stock}|\"{escaped_error_message}\"|{labels}|\"{escaped_trace}\""
+                                _test_file_in_line = line.split('|')[0]
+                                _test_class_in_line = line.split('|')[1]
+                                _test_case_in_line = line.split('|')[2]
+                                
+                                if _test_file == _test_file_in_line and test_class == _test_class_in_line and test_case == _test_case_in_line:                                    
+                                    issue_ids = f"{line.split('|')[4]},issues/{id}<{owner}>"
+                                    _labels = f"{line.split('|')[7]};#{id}:{labels}"
+                                    _labels = ";".join(sorted(set(_labels.split(';'))))                        
+                                    dynamic_skiped1[i] = f"{_test_file}|{items[1].split('.')[-1]}|{test_case}|{error_type}|{issue_ids}|{stock}|\"{escaped_error_message}\"|{_labels}|\"{escaped_trace}\""
                                     
-                                    updated = True
+                                    duplicated = True
                                     break
                             
-                            if not updated:
-                                dynamic_skiped1.append(f"{_test_file}|{items[1].split('.')[-1]}|{test_case}|{error_type}|issues/{skip_issue.replace('.txt', '')}<{owner}>|{stock}|\"{escaped_error_message}\"|{labels}|\"{escaped_trace}\"")
+                            if not duplicated:
+                                dynamic_skiped1.append(f"{_test_file}|{items[1].split('.')[-1]}|{test_case}|{error_type}|issues/{id}<{owner}>|{stock}|\"{escaped_error_message}\"|#{id}:{labels}|\"{escaped_trace}\"")
                                 
                         except Exception as e:
                             print(f"Error processing line: {line} in issue {skip_issue}, error: {e}")
@@ -185,25 +191,15 @@ def main():
         df1 = pd.read_excel(xlsx_file1, sheet_name='dynamic_skipped_list_xpuindex')
         df2 = pd.read_csv(csv_file2, sep='|', header=None, names=["File", "Class", "Case", "Reason", "Issue Link", "Stock Issue", "Error type", "Labels", "Trace"])
         
-        # Perform outer merge based on test_file, test_class, and test_case
+        # Perform left merge to keep all records from df2 and bring Status from df1
         merged_df = pd.merge(
-            df1, 
-            df2, 
+            df2,
+            df1[["File", "Class", "Case", "Status"]], 
             on=["File", "Class", "Case"], 
-            how="outer",
-            suffixes=('_old', '_new')
+            how="left"
         )
         
-        # Optionally, combine columns from both sources (keeping new values when available)
-        for col in df2.columns:
-            if col not in ["test_file", "test_class", "test_case"]:
-                old_col = f"{col}_old"
-                new_col = f"{col}_new"
-                if old_col in merged_df.columns and new_col in merged_df.columns:
-                    merged_df[col] = merged_df[new_col].fillna(merged_df[old_col])
-                    merged_df.drop([old_col, new_col], axis=1, inplace=True)
-
-        merged_df.to_excel(output_xlsx, index=False)
+        merged_df.to_excel(output_xlsx, sheet_name='dynamic_skipped_ut_status', index=False)
 
     if os.path.exists("dynamic_skipped_list_xpuindex.xlsx") and os.path.exists("dynamic_skipped_list_xpuindex.csv"):
         merge_skip_lists("dynamic_skipped_list_xpuindex.xlsx", "dynamic_skipped_list_xpuindex.csv", "dynamic_skipped_list_xpuindex_merged.xlsx")
