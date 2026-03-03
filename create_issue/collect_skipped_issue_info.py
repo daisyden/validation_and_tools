@@ -191,10 +191,17 @@ def main():
         df1 = pd.read_excel(xlsx_file1, sheet_name='dynamic_skipped_list_xpuindex')
         df2 = pd.read_csv(csv_file2, sep='|', header=None, names=["File", "Class", "Case", "Reason", "Issue Link", "Stock Issue", "Error type", "Labels", "Trace"])
         
+        # Remove duplicates from df1 based on File, Class, Case, keeping first occurrence
+        # Mark duplicates' Status as empty string before dropping
+        df1['Status'] = df1.groupby(['File', 'Class', 'Case'])['Status'].transform(
+            lambda x: '' if len(x) > 1 else x
+        )
+        df1_deduped = df1.drop_duplicates(subset=["File", "Class", "Case"], keep='first')
+        
         # Perform left merge to keep all records from df2 and bring Status from df1
         merged_df = pd.merge(
             df2,
-            df1[["File", "Class", "Case", "Status"]], 
+            df1_deduped[["File", "Class", "Case", "Status"]], 
             on=["File", "Class", "Case"], 
             how="left"
         )
