@@ -403,14 +403,25 @@ class FilePatternMatcher:
 
     # Test type detection patterns
     TEST_TYPE_PATTERNS = {
+        "xpu-cpp_wrapper": [r"-test-inductor_cpp_wrapper.*linux\.idc\.xpu"],
+        "xpu-inductor": [r"-test-inductor.*linux\.idc\.xpu"],
         "xpu-default": [r"-test-default.*linux\.idc\.xpu"],
-        "xpu-unknown": [r"linux\.idc\.xpu"],
-        "cuda-default": [r"-test-default.*(nvidia|linux.dgx)"],
-        "cuda-inductor": [r"-test-inductor.*(nvidia|linux.dgx)"],
-        "cuda-distributed": [r"-test-distributed.*(nvidia|linux.dgx)"],
-        "cuda-unknown": [r"(nvidia|linux.dgx)"],
+        "xpu-inductor": [r"/stock_xpu.*/inductor/"],
+        "xpu-cpp_wrapper": [r"/stock_xpu.*cpp_wrapper"],
+        "xpu-distributed": [r"stock_xpu.*/test/distributed/"],
         "xpu-distributed": [r"xpu_distributed"],
-        "xpu-ops": [r"op_ut_with_"],
+        "xpu-ops": [r"xpu-ops"],
+        "xpu-bmg": [r"linux\.client\.xpu"],
+        "xpu-unknown": [r"linux\.idc\.xpu"],
+        "cuda-cpp_wrapper": [r"-test-inductor_cpp_wrapper.*(nvidia|linux.dgx)"],
+        "cuda-cpp_wrapper": [r"/cuda.*/cpp_wrapper/"],
+        "cuda-inductor": [r"-test-inductor.*(nvidia|linux.dgx)"],
+        "cuda-inductor": [r"/cuda.*/inductor/"],
+        "cuda-distributed": [r"-test-distributed.*(nvidia|linux.dgx)"],
+        "cuda-distributed": [r"/cuda.*/distributed/"],
+        "cuda-default": [r"-test-default.*(nvidia|linux.dgx)"],
+        "cuda-distributed": [r"/cuda.*/default/"],
+        "cuda-unknown": [r"(nvidia|linux.dgx)"],
     }
 
     # File replacement mappings
@@ -439,7 +450,7 @@ class FilePatternMatcher:
             if any(pattern.search(xml_file_str) for pattern in patterns):
                 return test_type
 
-        return "xpu-undefined"
+        return "others-undefined"
 
     @lru_cache(maxsize=2048)
     def normalize_filepath(self, filepath: str, testtype: str) -> str:
@@ -853,7 +864,7 @@ class TestResultAnalyzer:
     def merge_last_results_optimized(self, last_df: pd.DataFrame) -> pd.DataFrame:
         """Optimized merge of last results."""
         if last_df.empty:
-            return self.dataframe
+            return pd.concat([self.dataframe, pd.DataFrame(columns=['last_status', 'last_time'])], axis=1)
 
         # Select and rename columns efficiently
         last_df_clean = last_df[[
@@ -877,14 +888,13 @@ class TestResultAnalyzer:
             last_df_clean,
             on=["uniqname", "testfile", "classname", "name", "device"],
             how="outer",
-            sort=False,  # Disable sorting for better performance
-            copy=False   # Avoid unnecessary copying
+            sort=False
         ).fillna('')
 
     def merge_last_reasons_optimized(self, reson_df: pd.DataFrame) -> pd.DataFrame:
         """Optimized merge of last reasons."""
         if reson_df.empty:
-            return self.dataframe
+            return pd.concat([self.dataframe, pd.DataFrame(columns=['Reason', 'DetailReason'])], axis=1)
 
         # Prepare reson_df
         reson_df_clean = reson_df[['testfile_cuda', 'classname_cuda', 'name_cuda', 'Reason', 'DetailReason']].copy()
@@ -901,8 +911,7 @@ class TestResultAnalyzer:
             reson_df_clean,
             on=['testfile', 'classname', 'name'],
             how='left',
-            sort=False,
-            copy=False
+            sort=False
         ).fillna('')
 
     def get_unique_test_cases(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
@@ -934,7 +943,7 @@ class TestResultAnalyzer:
         # Drop duplicates keeping first occurrence (highest priority due to sorting)
         result = df_sorted.drop_duplicates(subset=group_cols, keep='first')
         # Clean up and reset index
-        result = result.drop(columns=["_name", "_classname", "_testfile", "_testtype", "_status"], axis=1).reset_index(drop=True)
+        result = result.drop(columns=["_name", "_classname", "_testfile", "_testtype", "_status"]).reset_index(drop=True)
 
         return result
 
@@ -963,8 +972,7 @@ class TestResultAnalyzer:
             on="uniqname",
             how="outer",
             suffixes=("", "_duplicate"),
-            sort=False,
-            copy=False
+            sort=False
         ).fillna('')
 
         # merge xpu and cuda reasons
@@ -999,7 +1007,13 @@ class TestResultAnalyzer:
             (~merged_df['device_cuda'].isin(['cuda'])) & (merged_df['device_xpu'].isin(['xpu']))
         ]
 
-        return (left_merged_df, xpu_only_merged_df)
+        # Keep rows that are NOT in the "all empty/missing" category
+        cols_check = ['last_status_cuda', 'status_cuda', 'last_status_xpu', 'status_xpu']
+        masks = [left_merged_df[col].isna() | (left_merged_df[col] == '') for col in cols_check]
+        rows_to_drop = np.logical_and.reduce(masks)
+        left_merged_df_clean = left_merged_df[~rows_to_drop]
+
+        return (left_merged_df_clean, xpu_only_merged_df)
 
     def filter_by_pattern(self, df: pd.DataFrame, column: str, pattern: str, invert: bool = False) -> pd.DataFrame:
         """Filter DataFrame by pattern in a column."""
@@ -1177,8 +1191,7 @@ class TestSummaryAnalyzer:
                 on="testfile",
                 how="outer",
                 suffixes=("_cuda", "_xpu"),
-                sort=False,
-                copy=False
+                sort=False
             )
 
         return merged
