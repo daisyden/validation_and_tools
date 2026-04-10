@@ -661,7 +661,7 @@ class TestDetailsExtractor:
                 testtype=test_type,
                 status=status,
                 time=time_val,
-                message=message,
+                message=message.replace('\n', '<tr>')[:200],
             )
 
         except TestCaseValidationError as e:
@@ -1286,6 +1286,7 @@ class ReportExporter:
     def export_csv(self, analyzer: TestResultAnalyzer, output_path: Path) -> Dict[str, Path]:
         """Export results to CSV format."""
         output_files = {"main": output_path}
+        base_stem = output_path.stem
 
         # Get unique test cases
         unique_df = analyzer.get_unique_test_cases()
@@ -1310,7 +1311,6 @@ class ReportExporter:
             non_inductor_skipped = skipped_df[~inductor_mask]
 
             # Save additional files
-            base_stem = output_path.stem
             suffixes = {
                 "merged-inductor": inductor_merged,
                 "merged-non-inductor": non_inductor_merged,
