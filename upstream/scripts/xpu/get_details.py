@@ -598,28 +598,43 @@ class TestDetailsExtractor:
 
     def _determine_test_status(self, testcase: Element) -> Tuple[TestStatus, str, str]:
         """Determine test status and extract message/type."""
+        def extract_result_details(result: Element) -> Tuple[str, str, str]:
+            message = (result.get("message") or "").strip()
+            result_type = (result.get("type") or "").strip()
+            text = "\n".join(
+                part.strip() for part in result.itertext() if part and part.strip()
+            )
+            return message or text, result_type, text
+
         # Check for failure
         failure = testcase.find("failure")
         if failure is not None:
-            message = failure.get("message", "")
-            if "pytest.xfail" in message:
+            message, failure_type, failure_text = extract_result_details(failure)
+            failure_details = " ".join(
+                part for part in [message, failure_type, failure_text] if part
+            ).lower()
+            if "pytest.xfail" in failure_details or "xfail" in failure_details:
                 return TestStatus.XFAIL, message, "xfail"
-            return TestStatus.FAILED, message, "failure"
+            if "xpass" in failure_details:
+                return TestStatus.FAILED, message, "xpass"
+            return TestStatus.FAILED, message, failure_type or "failure"
 
         # Check for skip
         skipped = testcase.find("skipped")
         if skipped is not None:
-            message = skipped.get("message", "")
-            skip_type = skipped.get("type", "")
-            if "pytest.xfail" in skip_type or "pytest.xfail" in message:
+            message, skip_type, skip_text = extract_result_details(skipped)
+            skip_details = " ".join(
+                part for part in [message, skip_type, skip_text] if part
+            ).lower()
+            if "pytest.xfail" in skip_details or "xfail" in skip_details:
                 return TestStatus.XFAIL, message, "xfail"
-            return TestStatus.SKIPPED, message, skip_type
+            return TestStatus.SKIPPED, message, skip_type or "skipped"
 
         # Check for error
         error = testcase.find("error")
         if error is not None:
-            message = error.get("message", "")
-            return TestStatus.ERROR, message, "error"
+            message, error_type, _ = extract_result_details(error)
+            return TestStatus.ERROR, message, error_type or "error"
 
         return TestStatus.PASSED, "", ""
 
@@ -945,6 +960,9 @@ class TestResultAnalyzer:
         # Clean up and reset index
         result = result.drop(columns=["_name", "_classname", "_testfile", "_testtype", "_status"]).reset_index(drop=True)
 
+        # Drop rows where status is empty or null
+        # result = result[result['status'].notna() & (result['status'] != '')].reset_index(drop=True)
+
         return result
 
     def split_by_device(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -1012,6 +1030,12 @@ class TestResultAnalyzer:
         masks = [left_merged_df[col].isna() | (left_merged_df[col] == '') for col in cols_check]
         rows_to_drop = np.logical_and.reduce(masks)
         left_merged_df_clean = left_merged_df[~rows_to_drop]
+
+        # Drop rows where status_cuda is empty or null
+        left_merged_df_clean = left_merged_df_clean[
+            left_merged_df_clean['status_cuda'].notna()
+            & (left_merged_df_clean['status_cuda'] != '')
+        ]
 
         return (left_merged_df_clean, xpu_only_merged_df)
 
