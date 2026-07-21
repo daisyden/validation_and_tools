@@ -400,6 +400,10 @@ class FilePatternMatcher:
     _TESTFILE_PATTERN_CPP = re.compile(r".*/test/xpu/")
     _NORMALIZE_PATTERN = re.compile(r".*\.\./test/")
     _GPU_PATTERN = re.compile(r"(?:xpu|cuda)", re.IGNORECASE)
+    # Device markers stripped from class/name when building a uniqname so that
+    # CUDA and XPU variants of the same test collapse to one identifier.
+    _UNIQNAME_CLASS_DEVICE_PATTERN = re.compile(r"(?:Device)?(?:XPU|CUDA)$")
+    _UNIQNAME_NAME_DEVICE_PATTERN = re.compile(r"_(?:xpu|cuda)$", re.IGNORECASE)
 
     # Test type detection patterns
     TEST_TYPE_PATTERNS = {
@@ -408,7 +412,7 @@ class FilePatternMatcher:
         "xpu-default": [r"-test-default.*linux\.idc\.xpu"],
         "xpu-inductor": [r"/stock_xpu.*/inductor/"],
         "xpu-cpp_wrapper": [r"/stock_xpu.*cpp_wrapper"],
-        "xpu-distributed": [r"stock_xpu.*/test/distributed/"],
+        "xpu-distributed": [r"test/distributed/"],
         "xpu-distributed": [r"xpu_distributed"],
         "xpu-ops": [r"xpu-ops"],
         "xpu-bmg": [r"linux\.client\.xpu"],
@@ -526,8 +530,15 @@ class FilePatternMatcher:
 
     @lru_cache(maxsize=2048)
     def generate_uniqname(self, filename: str, classname: str, name: str) -> str:
-        """Generate unique identifier for test case."""
-        combined = f"{filename}{classname}{name}"
+        """Generate device-agnostic unique identifier for a test case."""
+        # Use the file basename so flattened XPU paths (e.g. test/test_distributions.py)
+        # match nested CUDA paths (e.g. test/distributions/test_distributions.py).
+        file_key = filename.rsplit("/", 1)[-1] if filename else filename
+        # Drop device markers (and the optional "Device" infix) from the class name.
+        class_key = self._UNIQNAME_CLASS_DEVICE_PATTERN.sub("", classname)
+        # Drop a trailing device suffix (e.g. "_xpu") from the test name.
+        name_key = self._UNIQNAME_NAME_DEVICE_PATTERN.sub("", name)
+        combined = f"{file_key}{class_key}{name_key}"
         return self._GPU_PATTERN.sub("cuda", combined)
 
 
@@ -1096,7 +1107,9 @@ class TestSummaryAnalyzer:
 
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
-        self.all_statuses = sorted(df['status'].unique())
+        # Exclude CUDA cases that were not run (empty status) from the counts.
+        self.df = self.df[~((self.df['device'] == 'cuda') & (self.df['status'] == ''))]
+        self.all_statuses = sorted(self.df['status'].unique())
         print(f"Status types found: {list(self.all_statuses)}")
 
     def analyze_by_category(self) -> pd.DataFrame:
@@ -1228,15 +1241,14 @@ class ReportExporter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _write_sheet_with_progress(self, writer: pd.ExcelWriter,
-                                   df: pd.DataFrame, sheet_name: str) -> None:
-        """Write DataFrame to Excel with progress tracking."""
-        if df.empty:
-            return
+    # Excel allows at most 1,048,576 rows per sheet; reserve one for the header.
+    EXCEL_MAX_ROWS_PER_SHEET = 1_048_576
+    MAX_DATA_ROWS_PER_SHEET = EXCEL_MAX_ROWS_PER_SHEET - 1
 
-        logger.info(f"Writing {len(df)} rows to sheet '{sheet_name}'...")
-
-        # Use chunking for very large DataFrames
+    def _write_single_sheet(self, writer: pd.ExcelWriter,
+                            df: pd.DataFrame, sheet_name: str) -> None:
+        """Write a DataFrame that fits within Excel's row limit to one sheet."""
+        # Use chunking for very large DataFrames to reduce peak memory usage.
         if len(df) > 100000:
             chunk_size = 50000
             for i in range(0, len(df), chunk_size):
@@ -1250,6 +1262,34 @@ class ReportExporter:
                                    startrow=startrow, header=False, index=False)
         else:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    def _write_sheet_with_progress(self, writer: pd.ExcelWriter,
+                                   df: pd.DataFrame, sheet_name: str) -> None:
+        """Write DataFrame to Excel, splitting across sheets if it exceeds the row limit."""
+        if df.empty:
+            return
+
+        logger.info(f"Writing {len(df)} rows to sheet '{sheet_name}'...")
+
+        # Fits in a single sheet.
+        if len(df) <= self.MAX_DATA_ROWS_PER_SHEET:
+            self._write_single_sheet(writer, df, sheet_name)
+            return
+
+        # Too large: split across multiple numbered sheets ("Name", "Name (2)", ...).
+        total_parts = (len(df) + self.MAX_DATA_ROWS_PER_SHEET - 1) // self.MAX_DATA_ROWS_PER_SHEET
+        logger.warning(
+            f"Sheet '{sheet_name}' has {len(df)} rows, exceeding Excel's limit of "
+            f"{self.MAX_DATA_ROWS_PER_SHEET}; splitting into {total_parts} sheets."
+        )
+        for part, start in enumerate(range(0, len(df), self.MAX_DATA_ROWS_PER_SHEET), start=1):
+            part_df = df.iloc[start:start + self.MAX_DATA_ROWS_PER_SHEET]
+            part_name = sheet_name if part == 1 else f"{sheet_name} ({part})"
+            # Excel sheet names are capped at 31 characters.
+            if len(part_name) > 31:
+                suffix = "" if part == 1 else f" ({part})"
+                part_name = sheet_name[:31 - len(suffix)] + suffix
+            self._write_single_sheet(writer, part_df, part_name)
 
     def export_excel(self, analyzer: TestResultAnalyzer, output_path: Path) -> Dict[str, Path]:
         """Export results to Excel format."""
@@ -1284,8 +1324,10 @@ class ReportExporter:
                 # Get XPU issues
                 skipped_df = analyzer.get_xpu_only_skipped(merged_df)
                 if not skipped_df.empty:
-                    inductor_skipped = skipped_df[inductor_mask]
-                    non_inductor_skipped = skipped_df[~inductor_mask]
+                    # Recompute the mask on skipped_df so it aligns with its index.
+                    skipped_inductor_mask = skipped_df["testfile_cuda"].str.contains("/inductor/", na=False)
+                    inductor_skipped = skipped_df[skipped_inductor_mask]
+                    non_inductor_skipped = skipped_df[~skipped_inductor_mask]
 
                     skipped_sheets = [
                         ("XPU skipped only Inductor", inductor_skipped),
@@ -1331,8 +1373,10 @@ class ReportExporter:
 
             # Get XPU issues
             skipped_df = analyzer.get_xpu_only_skipped(merged_df)
-            inductor_skipped = skipped_df[inductor_mask]
-            non_inductor_skipped = skipped_df[~inductor_mask]
+            # Recompute the mask on skipped_df so it aligns with its index.
+            skipped_inductor_mask = skipped_df["testfile_cuda"].str.contains("/inductor/", na=False)
+            inductor_skipped = skipped_df[skipped_inductor_mask]
+            non_inductor_skipped = skipped_df[~skipped_inductor_mask]
 
             # Save additional files
             suffixes = {
@@ -1556,8 +1600,13 @@ Examples:
             dataframes_to_concat = []
 
             if args.last is not None:
-                last_df = load_last_details(args.last, ['All Test Cases'])
-                last_df = last_df['All Test Cases']
+                all_sheets = load_last_details(args.last, None)
+                matching = [
+                    df for name, df in all_sheets.items()
+                    if 'All Test Cases' in name
+                ]
+                if matching:
+                    last_df = pd.concat(matching, ignore_index=True)
 
             if args.inductor is not None:
                 last_inductor_dfs = load_last_details(args.inductor, ['Cuda pass xpu skip'])
