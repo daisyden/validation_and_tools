@@ -374,6 +374,9 @@ class FilePatternMatcher:
         ("xpu-ops", [r"xpu-ops"]),
         ("xpu-bmg", [r"linux\.client\.xpu"]),
         ("xpu-unknown", [r"linux\.idc\.xpu"]),
+        # Default (non-inductor) stock XPU suite, e.g. .../stock_xpu/xmls/*.xml;
+        # kept after the inductor/cpp_wrapper stock_xpu rules so those win first.
+        ("xpu-default", [r"/stock_xpu/"]),
         ("cuda-cpp_wrapper", [r"-test-inductor_cpp_wrapper.*(nvidia|linux.dgx)"]),
         ("cuda-cpp_wrapper", [r"/cuda.*/cpp_wrapper/"]),
         ("cuda-inductor", [r"-test-inductor.*(nvidia|linux.dgx)"]),
