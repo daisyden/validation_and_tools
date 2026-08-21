@@ -472,19 +472,17 @@ class FilePatternMatcher:
 
     @lru_cache(maxsize=2048)
     def generate_uniqname(self, filename: str, classname: str, name: str) -> str:
-        """Generate the *real-name* unique identifier for a test case.
+        """Generate the unique identifier for a test case.
 
-        Per the merge design the uniqname preserves the real names: it is simply
-        the concatenation of the test file basename, test class and test name.
-        Device-marker normalisation is intentionally deferred
-        to merge time (see :meth:`normalize_uniqname`) so the stored identifier
-        stays faithful to the source while xpu/cuda/cpu variants can still be
-        collapsed when comparing devices.
+        It is the concatenation of the test file basename, test class and test
+        name, with the xpu/cuda tag folded to ``cuda`` (case-insensitive) so a
+        cuda- and an xpu-tagged variant share one identifier. ``cpu`` and
+        tag-less names are left intact and stay distinct.
         """
         # Use the file basename so flattened XPU paths (e.g. test/test_distributions.py)
         # match nested CUDA paths (e.g. test/distributions/test_distributions.py).
         file_key = filename.rsplit("/", 1)[-1] if filename else filename
-        return f"{file_key}{classname}{name}"
+        return self._GPU_PATTERN.sub("cuda", f"{file_key}{classname}{name}")
 
     @lru_cache(maxsize=2048)
     def normalize_uniqname(self, uniqname: str) -> str:
@@ -1219,38 +1217,48 @@ class TestResultAnalyzer:
             sort=False,
         ).fillna('')
 
+    @staticmethod
+    def _testtype_rank(testtype: str) -> int:
+        """Source preference for dedup: stock > ops > distributed > others (xpu and cuda)."""
+        tt = str(testtype).lower()
+        if "stock" in tt:
+            return 4
+        if "ops" in tt:
+            return 3
+        if "distributed" in tt:
+            return 2
+        if "other" in tt:
+            return 1
+        return 0
+
     def get_unique_test_cases(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """Deduplicate to a single row per ``(device, uniqname)``.
 
-        Among the rows sharing a ``(device, uniqname)`` the most representative
-        one is kept: rows whose ``name``/``classname``/``testfile`` carry the
-        device marker (i.e. the device-specific variant) win, and the
-        highest-priority ``status`` breaks the final tie.
+        The uniqname already folds the xpu/cuda tag to ``cuda`` (see
+        :meth:`FilePatternMatcher.generate_uniqname`), so a cuda- and an
+        xpu-tagged variant share a row. Among the rows sharing a case the kept
+        row is chosen by: a passing status first, then the source test type
+        (stock > ops > distributed > others, xpu and cuda), then the status
+        priority.
         """
         if df is None:
             df = self.dataframe.copy()
         if df.empty:
             return pd.DataFrame()
 
-        gpu = self.pattern_matcher._GPU_PATTERN
-        # Normalise the device marker (xpu/cuda -> cuda) once per column, then
-        # flag rows whose field carries that marker with a vectorised substring
-        # test (far cheaper than a row-wise ``apply``).
-        device_norm = df["device"].astype(str).str.replace(gpu, "cuda", regex=True)
-        for col in ("name", "classname", "testfile"):
-            field_norm = df[col].astype(str).str.replace(gpu, "cuda", regex=True)
-            df[f"_{col}"] = [needle in hay for needle, hay in zip(device_norm, field_norm)]
+        df["_pass"] = df["status"].astype(str).str.contains("pass", case=False, na=False)
+        df["_ttrank"] = df["testtype"].map(self._testtype_rank)
         df["_status"] = df["status"].map(lambda s: TestStatus.from_string(s).priority)
 
         # Highest-priority row first so ``keep="first"`` retains it; a stable
         # sort keeps the ordering deterministic for otherwise-equal rows.
-        sort_cols = ["_name", "_classname", "_testfile", "_status"]
+        sort_cols = ["_pass", "_ttrank", "_status"]
         df_sorted = df.sort_values(by=sort_cols, ascending=False, kind="stable")
 
         return (
             df_sorted
             .drop_duplicates(subset=["device", "uniqname"], keep="first")
-            .drop(columns=["_name", "_classname", "_testfile", "_status"])
+            .drop(columns=["_pass", "_ttrank", "_status"])
             .reset_index(drop=True)
         )
 
@@ -1894,10 +1902,10 @@ Examples:
 
     parser.add_argument(
         "--pytorch-ref",
-        default="release/2.13",
+        default="release/2.14",
         help="PyTorch git ref whose test/ tree is consulted to reconcile "
              "unmatched CUDA/XPU cases with different uniqnames "
-             "(default: release/2.13)",
+             "(default: release/2.14)",
     )
 
     parser.add_argument(
