@@ -364,28 +364,10 @@ class FilePatternMatcher:
     # test types map to more than one pattern; the first entry whose pattern
     # matches wins, and evaluation stops there.
     TEST_TYPE_PATTERNS = [
-        ("xpu-cpp_wrapper", [r"-test-inductor_cpp_wrapper.*linux\.idc\.xpu"]),
-        ("xpu-inductor", [r"-test-inductor.*linux\.idc\.xpu"]),
-        ("xpu-default", [r"-test-default.*linux\.idc\.xpu"]),
-        ("xpu-inductor", [r"/stock_xpu.*/inductor/"]),
-        ("xpu-cpp_wrapper", [r"/stock_xpu.*cpp_wrapper"]),
-        ("xpu-distributed", [r"test/distributed/"]),
-        ("xpu-distributed", [r"xpu_distributed"]),
-        ("xpu-ops", [r"xpu-ops"]),
-        ("xpu-bmg", [r"linux\.client\.xpu"]),
-        ("xpu-unknown", [r"linux\.idc\.xpu"]),
-        # Default (non-inductor) stock XPU suite, e.g. .../stock_xpu/xmls/*.xml;
-        # kept after the inductor/cpp_wrapper stock_xpu rules so those win first.
-        ("xpu-default", [r"/stock_xpu/"]),
-        ("cuda-cpp_wrapper", [r"-test-inductor_cpp_wrapper.*(nvidia|linux.dgx)"]),
-        ("cuda-cpp_wrapper", [r"/cuda.*/cpp_wrapper/"]),
-        ("cuda-inductor", [r"-test-inductor.*(nvidia|linux.dgx)"]),
-        ("cuda-inductor", [r"/cuda.*/inductor/"]),
-        ("cuda-distributed", [r"-test-distributed.*(nvidia|linux.dgx)"]),
-        ("cuda-distributed", [r"/cuda.*/distributed/"]),
-        ("cuda-default", [r"-test-default.*(nvidia|linux.dgx)"]),
-        ("cuda-distributed", [r"/cuda.*/default/"]),
-        ("cuda-unknown", [r"(nvidia|linux.dgx)"]),
+        ("xpu-stock", [r"/stock_xpu/"]),
+        ("xpu-ops", [r"/xpu-ops/"]),
+        ("xpu-distributed", [r"/distributed/"]),
+        ("cuda-stock", [r"cuda"]),
     ]
 
     # File replacement mappings
@@ -414,7 +396,7 @@ class FilePatternMatcher:
             if any(pattern.search(xml_file_str) for pattern in patterns):
                 return test_type
 
-        return "others-undefined"
+        return "xpu-others"
 
     @lru_cache(maxsize=2048)
     def normalize_filepath(self, filepath: str, testtype: str) -> str:
@@ -1211,46 +1193,31 @@ class TestResultAnalyzer:
         return merged.fillna('')
 
     def merge_last_reasons_optimized(self, reson_df: pd.DataFrame) -> pd.DataFrame:
-        """Attach the previous run's reasons, matched by uniqname.
+        """Attach reasons via a direct identity join, like the last-status merge.
 
-        The reason's uniqname is built from cuda's realnames
-        (``testfile_cuda``/``classname_cuda``/``name_cuda``) and reduced to the
-        device-agnostic key, so it matches through the same xpu/cuda uniqname
-        merge used elsewhere -- i.e. a cuda-derived reason lands on both the
-        cuda and the xpu rows of the same case.
+        The reason is keyed by cuda's ``testfile_cuda``/``classname_cuda``/
+        ``name_cuda`` and joined only onto the cuda rows; the cross-device merge
+        later carries it to the paired xpu row.
         """
         if reson_df.empty:
             return pd.concat([self.dataframe, pd.DataFrame(columns=['Reason', 'DetailReason'])], axis=1)
 
-        gen = self.pattern_matcher.generate_uniqname
-        norm = self.pattern_matcher.normalize_uniqname
-
-        reson_df_clean = reson_df[['testfile_cuda', 'classname_cuda', 'name_cuda', 'Reason', 'DetailReason']].copy()
-        # Reason uniqname comes from cuda's names, then normalised to the
-        # device-agnostic key so it merges like the xpu/cuda case merge.
-        reson_df_clean['_rkey'] = [
-            norm(gen(str(t), str(c), str(n)))
-            for t, c, n in zip(
-                reson_df_clean['testfile_cuda'],
-                reson_df_clean['classname_cuda'],
-                reson_df_clean['name_cuda'],
-            )
-        ]
-        reson_df_clean = (
-            reson_df_clean[['_rkey', 'Reason', 'DetailReason']]
-            .drop_duplicates(subset=['_rkey'], keep='first')
+        keys = ['testfile', 'classname', 'name', 'device']
+        reson_df_clean = reson_df[['testfile_cuda', 'classname_cuda', 'name_cuda', 'Reason', 'DetailReason']].rename(
+            columns={"testfile_cuda": "testfile", "classname_cuda": "classname", "name_cuda": "name"}
         )
+        # Reason is cuda-derived, so only attach it to cuda rows.
+        reson_df_clean['device'] = 'cuda'
+        # Deduplicate on the join keys to avoid row explosion.
+        reson_df_clean = reson_df_clean.drop_duplicates(subset=keys, keep='first')
 
-        merged = self.dataframe.copy()
-        merged['_rkey'] = merged['uniqname'].map(norm)
-        merged = pd.merge(
-            merged,
+        return pd.merge(
+            self.dataframe,
             reson_df_clean,
-            on='_rkey',
+            on=keys,
             how='left',
             sort=False,
-        ).drop(columns=['_rkey'])
-        return merged.fillna('')
+        ).fillna('')
 
     def get_unique_test_cases(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """Deduplicate to a single row per ``(device, uniqname)``.
@@ -1384,14 +1351,12 @@ class TestResultAnalyzer:
         # while each side keeps its real uniqname under uniqname_cuda/uniqname_xpu.
         cuda_df = cuda_df.add_suffix('_cuda').rename(columns={"_mergekey_cuda": "uniqname"})
         xpu_df = xpu_df.add_suffix('_xpu').rename(columns={"_mergekey_xpu": "uniqname"})
-        # Merge with optimized parameters
         merged_df = pd.merge(
             cuda_df,
             xpu_df,
             on="uniqname",
             how="outer",
-            suffixes=("", "_duplicate"),
-            sort=False
+            sort=False,
         ).fillna('')
 
         # Present the real uniqname (cuda's, else xpu's) instead of the internal
@@ -1402,14 +1367,7 @@ class TestResultAnalyzer:
             merged_df["uniqname_xpu"],
         )
 
-        # merge xpu and cuda reasons
-        conditions = [(merged_df['Reason_cuda'].isin(["", "To be enabled"])) & (~merged_df['Reason_xpu'].isin([""]))]
-        choices = [merged_df['Reason_xpu']]
-        merged_df['Reason_cuda'] = np.select(conditions, choices, default=merged_df['Reason_cuda'])
-        # detail reasons
-        choices = [merged_df['DetailReason_xpu']]
-        merged_df['DetailReason_cuda'] = np.select(conditions, choices, default=merged_df['DetailReason_cuda'])
-        #
+        # Reasons only ever attach to cuda rows; keep cuda's and drop xpu's.
         merged_df = merged_df.rename(columns={
             "Reason_cuda": "Reason",
             "DetailReason_cuda": "DetailReason",
@@ -1434,16 +1392,10 @@ class TestResultAnalyzer:
             (~merged_df['device_cuda'].isin(['cuda'])) & (merged_df['device_xpu'].isin(['xpu']))
         ]
 
-        # Keep rows that are NOT in the "all empty/missing" category
-        cols_check = ['last_status_cuda', 'status_cuda', 'last_status_xpu', 'status_xpu']
-        masks = [left_merged_df[col].isna() | (left_merged_df[col] == '') for col in cols_check]
-        rows_to_drop = np.logical_and.reduce(masks)
-        left_merged_df_clean = left_merged_df[~rows_to_drop]
-
-        # Drop rows where status_cuda is empty or null
-        left_merged_df_clean = left_merged_df_clean[
-            left_merged_df_clean['status_cuda'].notna()
-            & (left_merged_df_clean['status_cuda'] != '')
+        # Drop rows where the current cuda status is empty/null.
+        left_merged_df_clean = left_merged_df[
+            left_merged_df['status_cuda'].notna()
+            & (left_merged_df['status_cuda'] != '')
         ]
 
         return (left_merged_df_clean, xpu_only_merged_df)
